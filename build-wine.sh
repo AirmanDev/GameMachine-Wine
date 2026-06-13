@@ -22,12 +22,13 @@
 # configure flags below follow Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds;
 # a full Wine build is touchy, so pin dependency versions on the runner and tweak per CrossOver release.
 #
-# Output: ./gamemachine-wine-cx24-osx64.tar.xz. The workflow uploads it to the cx24.0.7-1 release.
+# Output: ./gamemachine-wine-cx26-osx64.tar.xz (CrossOver 26 / Wine 11, the GPTK 4.0-capable base).
+# The workflow uploads it to the cx26.2.0-1 release.
 set -eu
 
-CX_VERSION="${CX_VERSION:-24.0.7}"
-BUILD_TAG="${BUILD_TAG:-cx24.0.7-1}"
-OUTPUT_NAME="${OUTPUT_NAME:-gamemachine-wine-cx24-osx64.tar.xz}"
+CX_VERSION="${CX_VERSION:-26.2.0}"
+BUILD_TAG="${BUILD_TAG:-cx26.2.0-1}"
+OUTPUT_NAME="${OUTPUT_NAME:-gamemachine-wine-cx26-osx64.tar.xz}"
 MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 SOURCE_URL="${SOURCE_URL:-https://media.codeweavers.com/pub/crossover/source/crossover-sources-${CX_VERSION}.tar.gz}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"

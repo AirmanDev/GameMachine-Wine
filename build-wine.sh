@@ -83,7 +83,7 @@ cd "${BUILD}"
   --without-oss \
   --with-gnutls \
   --with-freetype \
-  --with-gstreamer \
+  --without-gstreamer \
   --with-sdl \
   --with-faudio \
   --with-mpg123 \

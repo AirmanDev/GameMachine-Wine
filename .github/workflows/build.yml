@@ -38,9 +38,15 @@ jobs:
         run: arch -x86_64 /bin/bash -c "NONINTERACTIVE=1 $(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
       - name: Install x86_64 build dependencies
+        # gstreamer is intentionally omitted: it pulls Python, whose bin/idle3 collides with the
+        # runner's pre-existing /usr/local Python and fails `brew link`. Wine builds fine without it
+        # (only some in-game video needs it); we configure --without-gstreamer to match. jpeg is also
+        # dropped (keg-only, conflicts with jpeg-turbo); Wine falls back to the system/builtin codec.
+        env:
+          HOMEBREW_NO_ENV_HINTS: "1"
         run: |
           arch -x86_64 /usr/local/bin/brew install bison flex mingw-w64 pkg-config freetype \
-                       gnutls gstreamer sdl2 faudio mpg123 libpng jpeg
+                       gnutls sdl2 faudio mpg123 libpng
 
       - name: Build Wine
         run: arch -x86_64 env HOMEBREW_PREFIX=/usr/local ./build-wine.sh

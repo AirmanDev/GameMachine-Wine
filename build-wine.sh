@@ -69,6 +69,10 @@ EOF
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"
 export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-Wl,-rpath,@loader_path/../../ -Wl,-rpath,${BREW}/lib"
+# mingw-w64 / gcc 14 defaults to C23, where `bool` is a reserved keyword. Wine 9.0's PE code still
+# uses `bool` as an identifier (e.g. programs/winhlp32/macro.h: `BOOL bool;`), which fails to parse.
+# Build the cross-compiled (PE) side as gnu17 so the pre-C23 meaning holds across all such code.
+export CROSSCFLAGS="-g -O2 -std=gnu17"
 
 echo "==> Configuring (new WoW64, i386 + x86_64)"
 mkdir -p "${BUILD}"
@@ -83,7 +87,7 @@ cd "${BUILD}"
   --without-oss \
   --with-gnutls \
   --with-freetype \
-  --without-gstreamer \
+  --with-gstreamer \
   --with-sdl \
   --with-faudio \
   --with-mpg123 \

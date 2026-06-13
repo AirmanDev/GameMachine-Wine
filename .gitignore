@@ -1,0 +1,2 @@
+# Build output — published as a GitHub release asset, not committed to the repo.
+*.tar.xz

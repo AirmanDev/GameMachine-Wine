@@ -34,8 +34,9 @@ JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 WORK="$(mktemp -d /tmp/gm-wine-build.XXXXXX)"
 STAGE="${WORK}/stage/wswine.bundle"
-SRC="${WORK}/wine"
+SRC="${WORK}/sources/wine"          # wine tree inside the CrossOver source bundle
 BUILD="${WORK}/build"
+TARBALL="${TARBALL_CACHE:-/tmp/crossover-sources-${CX_VERSION}.tar.gz}"  # cached download
 export MACOSX_DEPLOYMENT_TARGET
 
 BREW="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /usr/local)}"
@@ -45,18 +46,23 @@ echo "==> Building Wine from CrossOver ${CX_VERSION} (tag ${BUILD_TAG})"
 echo "    work: ${WORK}"
 echo "    brew: ${BREW}"
 
-echo "==> Downloading source"
-curl -fL "${SOURCE_URL}" -o "${WORK}/crossover-sources.tar.gz"
+echo "==> Downloading source (cache: ${TARBALL})"
+[ -f "${TARBALL}" ] || curl -fL "${SOURCE_URL}" -o "${TARBALL}"
 
+# The CrossOver bundle is one tarball whose top level is sources/ with many sibling projects
+# (wine, ghostscript, dxvk, gstreamer, ...). We only want sources/wine; extract just that so the
+# build can't wander into a sibling project's configure.
 echo "==> Extracting sources/wine"
-mkdir -p "${SRC}"
-tar -xzf "${WORK}/crossover-sources.tar.gz" -C "${WORK}" --strip-components=2 "*/sources/wine" \
-  || tar -xzf "${WORK}/crossover-sources.tar.gz" -C "${WORK}"
-if [ ! -x "${SRC}/configure" ]; then
-  found="$(find "${WORK}" -maxdepth 4 -name configure -path '*wine*' -print -quit)"
-  [ -n "${found}" ] && SRC="$(dirname "${found}")"
-fi
-[ -x "${SRC}/configure" ] || { echo "ERROR: wine source (configure) not found"; exit 1; }
+tar -xzf "${TARBALL}" -C "${WORK}" sources/wine
+[ -x "${SRC}/configure" ] || { echo "ERROR: wine configure not found at ${SRC}"; exit 1; }
+
+# CrossOver's winedbg includes programs/winedbg/distversion.h, which their top-level build
+# generates (it carries the crash-dialog strings). We build only sources/wine, so the file is
+# missing and config.status' makedep step fails. Provide a minimal one before configure runs.
+cat > "${SRC}/programs/winedbg/distversion.h" <<'EOF'
+#define WINDEBUG_WHAT_HAPPENED_MESSAGE "The program encountered a problem and stopped working."
+#define WINDEBUG_USER_SUGGESTION_MESSAGE "Please relaunch the application. If the problem persists, reinstall it."
+EOF
 
 # Keep winemac.drv symbols visible for DXMT. CrossOver already exports them; default visibility makes
 # sure a toolchain default of -fvisibility=hidden can't strip the Metal bridge.
@@ -70,7 +76,7 @@ cd "${BUILD}"
 "${SRC}/configure" \
   --prefix="${WORK}/stage-prefix" \
   --enable-archs=i386,x86_64 \
-  --with-mingw=clang \
+  --with-mingw \
   --disable-tests \
   --disable-win16 \
   --without-x \

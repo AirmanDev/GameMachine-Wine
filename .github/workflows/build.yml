@@ -47,7 +47,14 @@ jobs:
         run: |
           find /usr/local/bin -lname '*/Library/Frameworks/Python.framework/*' -delete 2>/dev/null || true
           arch -x86_64 /usr/local/bin/brew install --overwrite bison flex mingw-w64 pkg-config \
-                       freetype gnutls gstreamer sdl2 faudio mpg123 libpng
+                       freetype gnutls gstreamer sdl2 faudio mpg123 libpng vulkan-loader
+
+      # Cache the 150+ MB CrossOver source tarball so re-runs skip the download (build-wine.sh reuses it).
+      - name: Cache CrossOver source
+        uses: actions/cache@v4
+        with:
+          path: /tmp/crossover-sources-${{ env.CX_VERSION }}.tar.gz
+          key: crossover-src-${{ env.CX_VERSION }}
 
       - name: Build Wine
         run: arch -x86_64 env HOMEBREW_PREFIX=/usr/local ./build-wine.sh

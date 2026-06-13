@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      cx_version:
+        description: CrossOver source version
+        default: "24.0.7"
+      build_tag:
+        description: Release tag
+        default: "cx24.0.7-1"
+  push:
+    tags:
+      - "cx*"
+
+jobs:
+  build:
+    runs-on: macos-13
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install bison flex mingw-w64 gstreamer freetype gnutls sdl2 faudio \
+                       mpg123 libpng jpeg sane-backends libgphoto2 molten-vk pkg-config || true
+
+      - name: Build
+        env:
+          CX_VERSION: ${{ github.event.inputs.cx_version || '24.0.7' }}
+          BUILD_TAG: ${{ github.event.inputs.build_tag || 'cx24.0.7-1' }}
+          HOMEBREW_PREFIX: /usr/local
+        run: ./build-wine.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamemachine-wine
+          path: gamemachine-wine-*.tar.xz
+          retention-days: 14
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_TAG: ${{ github.event.inputs.build_tag || 'cx24.0.7-1' }}
+        run: |
+          gh release view "$BUILD_TAG" >/dev/null 2>&1 || gh release create "$BUILD_TAG" \
+            --title "$BUILD_TAG" \
+            --notes "Wine built from CrossOver source for GameMachine."
+          gh release upload "$BUILD_TAG" gamemachine-wine-*.tar.xz --clobber

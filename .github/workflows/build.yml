@@ -13,24 +13,37 @@ on:
     tags:
       - "cx*"
 
+# macos-14 is arm64 but ships Xcode 15.4 (clang 15), which does not have the Xcode 16+ integrated
+# assembler check that breaks Wine's signal_x86_64.c ("non-private labels ... .cfi_startproc"). It is
+# a standard runner, so it is free and plentiful on public repos (no macos-13 Intel queue). We build
+# the x86_64 Wine under Rosetta with an x86_64 Homebrew, the same way it is built locally.
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-14
     timeout-minutes: 180
+    env:
+      CX_VERSION: ${{ github.event.inputs.cx_version || '24.0.7' }}
+      BUILD_TAG: ${{ github.event.inputs.build_tag || 'cx24.0.7-1' }}
+      HOMEBREW_PREFIX: /usr/local
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install bison flex mingw-w64 gstreamer freetype gnutls sdl2 faudio \
-                       mpg123 libpng jpeg sane-backends libgphoto2 molten-vk pkg-config || true
+      - name: Select Xcode 15.4 (clang 15, no cfi assembler check)
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
-      - name: Build
-        env:
-          CX_VERSION: ${{ github.event.inputs.cx_version || '24.0.7' }}
-          BUILD_TAG: ${{ github.event.inputs.build_tag || 'cx24.0.7-1' }}
-          HOMEBREW_PREFIX: /usr/local
-        run: ./build-wine.sh
+      - name: Install Rosetta
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Install x86_64 Homebrew
+        run: arch -x86_64 /bin/bash -c "NONINTERACTIVE=1 $(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+      - name: Install x86_64 build dependencies
+        run: |
+          arch -x86_64 /usr/local/bin/brew install bison flex mingw-w64 pkg-config freetype \
+                       gnutls gstreamer sdl2 faudio mpg123 libpng jpeg
+
+      - name: Build Wine
+        run: arch -x86_64 env HOMEBREW_PREFIX=/usr/local ./build-wine.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -41,7 +54,6 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_TAG: ${{ github.event.inputs.build_tag || 'cx24.0.7-1' }}
         run: |
           gh release view "$BUILD_TAG" >/dev/null 2>&1 || gh release create "$BUILD_TAG" \
             --title "$BUILD_TAG" \

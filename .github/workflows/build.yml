@@ -9,9 +9,6 @@ on:
       build_tag:
         description: Release tag
         default: "cx26.2.0-1"
-  push:
-    tags:
-      - "cx*"
 
 # macos-14 is arm64 but ships Xcode 15.4 (clang 15), which does not have the Xcode 16+ integrated
 # assembler check that breaks Wine's signal_x86_64.c ("non-private labels ... .cfi_startproc"). It is

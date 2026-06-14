@@ -88,15 +88,15 @@ if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
        in reverse so the first listed dir ends up searched first, ahead of dll_dir. */
     if ((path = getenv( "WINEDLLPATH_PREPEND" )) && *path)
     {
-        char **gm_entries;
+        char *gm_path, **gm_entries;
         int gm_n = 0, gm_cap = 1;
         for (p = path; *p; p++) if (*p == ':') gm_cap++;
         gm_entries = malloc( gm_cap * sizeof(*gm_entries) );
-        path = strdup( path );
-        for (p = strtok( path, ":" ); p; p = strtok( NULL, ":" )) gm_entries[gm_n++] = strdup( p );
-        free( path );
+        gm_path = strdup( path );
+        for (p = strtok( gm_path, ":" ); p; p = strtok( NULL, ":" )) gm_entries[gm_n++] = p;
         while (gm_n > 0) prepend_dll_path( gm_entries[--gm_n] );
         free( gm_entries );
+        free( gm_path );
     }
 CEOF
   sed -i.bak '/^    dll_paths\[count\] = NULL;$/r '"${WORK}/gm-prepend.c" "${LOADER}"
@@ -149,7 +149,8 @@ winemac="$(find "${STAGE}/lib/wine" \( -name 'winemac.drv.so' -o -name 'winemac.
 if [ -n "${winemac}" ] && nm -gU "${winemac}" 2>/dev/null | grep -qi 'macdrv'; then
   echo "==> winemac exports macdrv_* (DXMT can bind)"
 else
-  echo "WARN: macdrv_* symbols not found in winemac driver; check the visibility flags"
+  echo "ERROR: macdrv_* symbols not found in winemac driver; DXMT cannot bind"
+  exit 1
 fi
 
 # Bundle the shared wine-mono (.NET) and wine-gecko (MSHTML) runtimes so a fresh prefix doesn't
@@ -190,6 +191,66 @@ done
 [ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86_64" ] && [ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86" ] \
   || { echo "ERROR: wine-gecko did not extract to wine-gecko-${GECKO_VERSION}-{x86,x86_64}"; exit 1; }
 echo "==> Mono/Gecko bundled (share/wine/mono/wine-mono-${MONO_VERSION}, share/wine/gecko/wine-gecko-${GECKO_VERSION}-*)"
+
+echo "==> Bundling native runtime dependencies"
+BUNDLE_LIB_DIR="${STAGE}/lib"
+BUNDLE_DEPS="${WORK}/bundle-native-deps.txt"
+mkdir -p "${BUNDLE_LIB_DIR}"
+
+collect_external_deps() {
+  : > "$1"
+  find "${STAGE}" \( -path "${STAGE}/share/wine/mono" -o -path "${STAGE}/share/wine/gecko" \) -prune -o \
+    -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print0 2>/dev/null \
+    | while IFS= read -r -d '' f; do
+        if file "$f" | grep -q Mach-O; then
+          otool -L "$f" | awk 'NR > 1 { print $1 }' | while IFS= read -r dep; do
+            case "$dep" in
+              /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
+              *) printf '%s	%s\n' "$f" "$dep" >> "$1" ;;
+            esac
+          done
+        fi
+      done
+}
+
+bundle_external_deps() {
+  collect_external_deps "${BUNDLE_DEPS}"
+  [ -s "${BUNDLE_DEPS}" ] || return 1
+
+  sort -u "${BUNDLE_DEPS}" | while IFS="$(printf '\t')" read -r owner dep; do
+    [ -f "${dep}" ] || { echo "ERROR: dependency not found: ${owner#${STAGE}/} -> ${dep}"; exit 1; }
+    leaf="$(basename "${dep}")"
+    dest="${BUNDLE_LIB_DIR}/${leaf}"
+
+    if [ ! -f "${dest}" ]; then
+      cp -p "${dep}" "${dest}"
+      chmod u+w "${dest}" 2>/dev/null || true
+      install_name_tool -id "@loader_path/${leaf}" "${dest}" 2>/dev/null || true
+      echo "    bundled ${leaf}"
+    fi
+
+    chmod u+w "${owner}" 2>/dev/null || true
+    case "${owner#${STAGE}/}" in
+      bin/*) replacement="@loader_path/../lib/${leaf}" ;;
+      lib/wine/*) replacement="@loader_path/../../${leaf}" ;;
+      lib/*) replacement="@loader_path/${leaf}" ;;
+      *) replacement="@rpath/${leaf}" ;;
+    esac
+    install_name_tool -change "${dep}" "${replacement}" "${owner}"
+  done
+}
+
+while bundle_external_deps; do :; done
+
+echo "==> Auditing native runtime dependencies"
+BAD_DEPS="${WORK}/bad-native-deps.txt"
+collect_external_deps "${BAD_DEPS}"
+if [ -s "${BAD_DEPS}" ]; then
+  echo "ERROR: non-system native dependencies found in the Wine artifact:"
+  awk -F "$(printf '\t')" '{ print $1 " -> " $2 }' "${BAD_DEPS}"
+  echo "Bundle these libraries in wswine.bundle/lib or disable the feature before release."
+  exit 1
+fi
 
 echo "==> Ad-hoc signing"
 # Sign only the native Mach-O modules. A `while read -d ''` loop (NOT `xargs -I{}`, which now hits

@@ -35,11 +35,17 @@ Dependencies (x86_64 Homebrew under `/usr/local`): bison, flex, mingw-w64, pkg-c
 gnutls, gstreamer, sdl2, faudio, mpg123, libpng, and vulkan-loader. A full Wine build is sensitive to
 the host setup, so pin dependency versions and adjust configure flags per CrossOver release.
 
+The release artifact must be self-contained for end users. GStreamer is enabled for Wine media
+paths, but the script fails the build if any native Mach-O module keeps an absolute non-system dylib
+dependency. If GStreamer/FFmpeg pulls in developer-machine `/usr/local` libraries, the build script
+copies them into `wswine.bundle/lib`, rewrites references to loader-relative install names
+(`@loader_path/...`), and audits the result before signing and packaging.
+
 The current published release is:
 
 - Tag: `cx26.2.0-1`
 - Asset: `gamemachine-wine-cx26-osx64.tar.xz`
-- SHA-256: `e7b4d4397184c6a8494a4c06d716bd70e173447babfe2422b968a90d36d60bbc`
+- SHA-256: `1f49703bbef6be0356966c5540d67f1c52e4bba57e203c83c35980ceaff632a1`
 
 The tarball includes Wine Mono/Gecko, WoW64 (`i386-windows` + `x86_64-windows`), the x86_64 Unix
 modules, and the loader patch that restores `WINEDLLPATH_PREPEND` for the D3DMetal bridge.

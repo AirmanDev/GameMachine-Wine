@@ -104,6 +104,51 @@ CEOF
   grep -q 'WINEDLLPATH_PREPEND' "${LOADER}" || { echo "ERROR: WINEDLLPATH_PREPEND patch did not apply"; exit 1; }
 fi
 
+# GameMachine: Steam's CEF webhelper (steamwebhelper.exe) renders BLACK under winemac with its default
+# ANGLE GL backend. Verified via macdrv/bitblt trace that the present path is fine (both ANGLE and
+# SwiftShader present identically through NtGdiStretchBlt) — ANGLE just emits a black frame. Force the
+# software SwiftShader GL backend on every webhelper launch (the browser process AND its gpu/renderer
+# children, which also go through CreateProcess). Relocates the former per-prefix steamwebhelper.exe
+# wrapper into the engine: no binary swap, automatic for all prefixes. Placed in CreateProcessInternalW
+# right after CrossOver's own app-specific hacks (Epic/powershell), modifying tidy_cmdline (the cmdline
+# actually used downstream; freed at function end). Idempotent (skip if present).
+PROC="${SRC}/dlls/kernelbase/process.c"
+if ! grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}"; then
+  echo "==> Patching process.c: force SwiftShader GL on Steam CEF webhelper (black-UI fix)"
+  cat > "${WORK}/gm-steam-cef.c" <<'CEOF'
+    /* GameMachine HACK: Steam's CEF webhelper (steamwebhelper.exe) renders BLACK under winemac with
+       its default ANGLE GL backend. Verified via macdrv/bitblt trace that the present path is fine
+       (both ANGLE and SwiftShader present identically through NtGdiStretchBlt) — ANGLE just emits a
+       black frame. Force the software SwiftShader GL backend on every webhelper launch (the browser
+       process AND its gpu/renderer children, which also pass through CreateProcess), unless already
+       set. Same flags the standalone prefix wrapper used, relocated into the engine so no per-prefix
+       binary swap is needed. Idempotency marker: --use-gl=swiftshader (Chromium propagates it to
+       children, so we don't double-append). */
+    if (tidy_cmdline && wcsstr( tidy_cmdline, L"steamwebhelper.exe" )
+        && !wcsstr( tidy_cmdline, L"--use-gl=swiftshader" ))
+    {
+        static const WCHAR gm_cef_flags[] = L" --use-gl=swiftshader --in-process-gpu --no-sandbox --disable-gpu --disable-gpu-compositing";
+        DWORD gm_cef_head = lstrlenW( tidy_cmdline );
+        DWORD gm_cef_len = gm_cef_head + ARRAY_SIZE( gm_cef_flags );
+        WCHAR *gm_cef_cmd = RtlAllocateHeap( GetProcessHeap(), 0, gm_cef_len * sizeof(WCHAR) );
+        if (gm_cef_cmd)
+        {
+            lstrcpyW( gm_cef_cmd, tidy_cmdline );
+            lstrcpyW( gm_cef_cmd + gm_cef_head, gm_cef_flags );
+            if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
+            tidy_cmdline = gm_cef_cmd;
+            FIXME( "GameMachine HACK: forcing --use-gl=swiftshader on Steam CEF webhelper\n" );
+        }
+    }
+
+CEOF
+  GM_BLOCK="${WORK}/gm-steam-cef.c" perl -0777 -i -pe '
+    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
+    s{(\Q    /* Warn if unsupported features are used */\E)}{$b$1};
+  ' "${PROC}"
+  grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}" || { echo "ERROR: Steam CEF patch did not apply"; exit 1; }
+fi
+
 # Keep winemac.drv symbols visible for DXMT. CrossOver already exports them; default visibility makes
 # sure a toolchain default of -fvisibility=hidden can't strip the Metal bridge.
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"

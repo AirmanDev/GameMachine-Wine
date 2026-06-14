@@ -12,7 +12,7 @@ on:
 
 # macos-14 is arm64 but ships Xcode 15.4 (clang 15), which does not have the Xcode 16+ integrated
 # assembler check that breaks Wine's signal_x86_64.c ("non-private labels ... .cfi_startproc"). It is
-# a standard runner, so it is free and plentiful on public repos (no macos-13 Intel queue). We build
+# a standard runner, so it is free and plentiful on public repos. We build
 # the x86_64 Wine under Rosetta with an x86_64 Homebrew, the same way it is built locally.
 jobs:
   build:

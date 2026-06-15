@@ -41,12 +41,6 @@ dependency. If GStreamer/FFmpeg pulls in developer-machine `/usr/local` librarie
 copies them into `wswine.bundle/lib`, rewrites references to loader-relative install names
 (`@loader_path/...`), and audits the result before signing and packaging.
 
-The current published release is:
-
-- Tag: `cx26.2.0-1`
-- Asset: `gamemachine-wine-cx26-osx64.tar.xz`
-- SHA-256: `1f49703bbef6be0356966c5540d67f1c52e4bba57e203c83c35980ceaff632a1`
-
 The tarball includes Wine Mono/Gecko, WoW64 (`i386-windows` + `x86_64-windows`), the x86_64 Unix
 modules, and the loader patch that restores `WINEDLLPATH_PREPEND` for the D3DMetal bridge.
 

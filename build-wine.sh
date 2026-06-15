@@ -87,10 +87,10 @@ echo "==> Ensuring xPack mingw-w64 GCC 13.2.0 (CrossOver PE toolchain)"
 echo "${XPACK_SHA256}  ${XPACK_CACHE}" | shasum -a 256 -c - >/dev/null \
   || { echo "ERROR: xPack toolchain SHA-256 mismatch for ${XPACK_CACHE}"; exit 1; }
 if [ ! -x "${XPACK_ROOT}/bin/x86_64-w64-mingw32-gcc" ]; then
-  rm -rf "${XPACK_ROOT}.tmp" "${XPACK_ROOT}"; mkdir -p "${XPACK_ROOT}.tmp"
-  tar -xzf "${XPACK_CACHE}" -C "${XPACK_ROOT}.tmp"
-  inner="$(find "${XPACK_ROOT}.tmp" -maxdepth 1 -type d -name 'xpack-mingw-w64-gcc-*' | head -1)"
-  mv "${inner}" "${XPACK_ROOT}"; rm -rf "${XPACK_ROOT}.tmp"
+  rm -rf "${XPACK_ROOT}"; mkdir -p "${XPACK_ROOT}"
+  # The tarball has a single top-level xpack-mingw-w64-gcc-*/ dir; --strip-components=1 drops it so
+  # bin/ lands directly at ${XPACK_ROOT}/bin (deterministic — no find/mv that could double-nest).
+  tar -xzf "${XPACK_CACHE}" -C "${XPACK_ROOT}" --strip-components=1
 fi
 xattr -dr com.apple.quarantine "${XPACK_ROOT}" 2>/dev/null || true
 export PATH="${XPACK_ROOT}/bin:${PATH}"

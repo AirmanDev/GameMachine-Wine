@@ -35,9 +35,27 @@ rebuild Wine: local builds are faster to inspect, and the release asset can be u
 because that image provides the arm64 runner shape we need and can select Xcode 15.4. Newer images are
 not automatically better for this build; Xcode 16+ currently trips Wine's x86_64 CFI assembler path.
 
-Dependencies (x86_64 Homebrew under `/usr/local`): bison, flex, mingw-w64, pkg-config, freetype,
-gnutls, gstreamer, sdl2, faudio, mpg123, libpng, and vulkan-loader. A full Wine build is sensitive to
-the host setup, so pin dependency versions and adjust configure flags per CrossOver release.
+Dependencies (x86_64 Homebrew under `/usr/local`): bison, flex, pkg-config, freetype, gnutls,
+gstreamer, sdl2, faudio, mpg123, libpng, and vulkan-loader. A full Wine build is sensitive to the host
+setup, so pin dependency versions and adjust configure flags per CrossOver release. The mingw-w64 PE
+cross-compiler is **not** taken from Homebrew — see the toolchain pin below.
+
+## PE toolchain is pinned to mingw GCC 13.2.0 (Overwatch 2 / eidolon)
+
+The Windows PE DLLs must be built with **mingw-w64 GCC 13.2.0** — CrossOver's exact PE compiler — not a
+newer GCC. Blizzard's `eidolon` anti-tamper (Overwatch 2, and D2R/D4 since Jan 2026) scans the loaded
+Wine modules' in-memory code and dispatches via raised exceptions; it is sensitive to the exact
+codegen. Builds with GCC 15.2.0 **and** 13.4.0 both make an eidolon routine recurse into a stack
+overflow inside `Overwatch_loader.dll`, holding ntdll's `loader_section` so the game deadlocks at
+launch. This was isolated on a real M5 Pro: CrossOver's GCC-13.2.0 PE DLLs dropped into our own engine
+pass eidolon, our GCC-13.4.0 ones don't — even after a full `--strip-all` (so it is not debug info),
+and ntdll's export surface is identical (so it is not an API patch). The minor version matters.
+
+GCC 13.2.0 will not compile from source on a modern macOS SDK (GCC bug #111632), so `build-wine.sh`
+downloads the prebuilt [xPack mingw-w64 GCC 13.2.0](https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/tag/v13.2.0-1)
+toolchain (both i686 + x86_64 targets, darwin-x64 so it runs under Rosetta) and hard-fails if the cross
+GCC is anything other than 13.2.0. The PE DLLs are then built without `-g` and `--strip-all`-stripped,
+matching CrossOver's lean, stripped release layout (strip is for parity/size, not the eidolon fix).
 
 The release artifact must be self-contained for end users. GStreamer is enabled for Wine media
 paths, but the script fails the build if any native Mach-O module keeps an absolute non-system dylib

@@ -19,12 +19,15 @@
 #
 # Host arch: x86_64. The wine binary translates x86/x64 Windows code and runs under Rosetta on Apple
 # Silicon, the same way CrossOver and GPTK do. Build natively on an Intel runner, or under
-# `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64 (llvm-mingw) regardless.
+# `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64, cross-compiled with
+# mingw-w64 GCC 13.2.0 (pinned below — CrossOver's exact PE toolchain; see the eidolon/OW2 note).
 #
-# Dependencies (Homebrew on an x86_64 prefix): bison flex mingw-w64 gstreamer freetype gnutls sdl2
-# faudio mpg123 libpng jpeg sane-backends libgphoto2 molten-vk pkg-config, plus the Xcode CLT. The
-# configure flags below follow Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds;
-# a full Wine build is touchy, so pin dependency versions on the runner and tweak per CrossOver release.
+# Dependencies (Homebrew on an x86_64 prefix): bison flex gstreamer freetype gnutls sdl2 faudio mpg123
+# libpng jpeg sane-backends libgphoto2 molten-vk pkg-config, plus the Xcode CLT. The mingw-w64 cross
+# compiler is NOT taken from Homebrew (it tracks the latest GCC, which breaks Overwatch 2 — see below);
+# the pinned xPack GCC 13.2.0 toolchain is downloaded by this script. The configure flags follow
+# Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds; a full Wine build is touchy,
+# so pin dependency versions on the runner and tweak per CrossOver release.
 #
 # Output: ./gamemachine-wine-v1-osx64.tar.xz (CrossOver 26 / Wine 11, the GPTK 4.0-capable base).
 # The workflow uploads it to the v1 release.
@@ -51,6 +54,54 @@ export PATH="${BREW}/opt/bison/bin:${BREW}/opt/flex/bin:${BREW}/bin:${PATH}"
 echo "==> Building Wine from CrossOver ${CX_VERSION} (tag ${BUILD_TAG})"
 echo "    work: ${WORK}"
 echo "    brew: ${BREW}"
+
+# --- mingw-w64 cross-compiler: pin to GCC 13.2.0 (CrossOver's exact PE toolchain) -----------------
+# WHY 13.2.0 EXACTLY (not just "GCC 13.x"): Blizzard's "eidolon" anti-tamper (Overwatch 2, and D2R/D4
+# since the Jan 2026 rollout) scans the in-memory CODE of the loaded Wine PE modules and dispatches via
+# raised exceptions. It is sensitive to the exact instruction stream the compiler emits. CrossOver 26
+# builds its PE DLLs with mingw GCC 13.2.0 and OW2 runs; our earlier builds with GCC 15.2.0 AND 13.4.0
+# both make an eidolon routine recurse into a stack overflow inside Overwatch_loader.dll — the dead
+# thread holds ntdll's loader_section, every other thread then times out on it, and the game never
+# starts. Isolated on a real M5 Pro (macOS 26): dropping CrossOver's GCC-13.2.0 PE DLLs into our own
+# engine (our x86_64-unix .so + our wine binary + our prefix + the same Rosetta) makes eidolon PASS,
+# while our GCC-13.4.0 PE DLLs overflow — even after a full --strip-all (so it is NOT debug info /
+# SizeOfImage). ntdll's export surface is byte-for-byte the same count/ordinals in both (so it is NOT
+# an API-adding patch) → it is pure codegen, and the minor version matters (13.2.0 != 13.4.0). So we
+# pin 13.2.0. CodeWeavers (a Blizzard partner) match this toolchain rather than reverse-engineer the
+# obfuscated eidolon; the open-source mitigation is the same. Details: docs/WineBuildStatus.md §13.
+#
+# We can't build GCC 13.2.0 from source on a modern macOS SDK (safe-ctype.h poisons islower/toupper,
+# which the newer libc++ then trips over — GCC bug #111632, fixed only on 13.3+). So we use the xPack
+# prebuilt mingw-w64 GCC 13.2.0 toolchain (ships BOTH i686 + x86_64 targets), darwin-x64 so it runs
+# natively on an Intel runner and under Rosetta on Apple Silicon. This REPLACES Homebrew's mingw-w64
+# (which tracks the latest GCC) for the PE cross-compilation; the rest of the build is unchanged.
+XPACK_TAG="${XPACK_TAG:-v13.2.0-1}"
+XPACK_ARCHIVE="xpack-mingw-w64-gcc-13.2.0-1-darwin-x64.tar.gz"
+XPACK_SHA256="9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae"
+XPACK_URL="https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/download/${XPACK_TAG}/${XPACK_ARCHIVE}"
+XPACK_CACHE="${XPACK_CACHE:-/tmp/${XPACK_ARCHIVE}}"
+XPACK_ROOT="${XPACK_ROOT:-/tmp/xpack-mingw-w64-gcc-13.2.0-1}"
+
+echo "==> Ensuring xPack mingw-w64 GCC 13.2.0 (CrossOver PE toolchain)"
+[ -f "${XPACK_CACHE}" ] || curl -fL "${XPACK_URL}" -o "${XPACK_CACHE}"
+echo "${XPACK_SHA256}  ${XPACK_CACHE}" | shasum -a 256 -c - >/dev/null \
+  || { echo "ERROR: xPack toolchain SHA-256 mismatch for ${XPACK_CACHE}"; exit 1; }
+if [ ! -x "${XPACK_ROOT}/bin/x86_64-w64-mingw32-gcc" ]; then
+  rm -rf "${XPACK_ROOT}.tmp" "${XPACK_ROOT}"; mkdir -p "${XPACK_ROOT}.tmp"
+  tar -xzf "${XPACK_CACHE}" -C "${XPACK_ROOT}.tmp"
+  inner="$(find "${XPACK_ROOT}.tmp" -maxdepth 1 -type d -name 'xpack-mingw-w64-gcc-*' | head -1)"
+  mv "${inner}" "${XPACK_ROOT}"; rm -rf "${XPACK_ROOT}.tmp"
+fi
+xattr -dr com.apple.quarantine "${XPACK_ROOT}" 2>/dev/null || true
+export PATH="${XPACK_ROOT}/bin:${PATH}"
+
+# Hard pin: both PE target compilers must be EXACTLY 13.2.0 (see the eidolon note above). Fail loudly
+# so toolchain drift can never silently reintroduce the Overwatch 2 loader deadlock.
+for cc in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
+  v="$("${cc}" -dumpfullversion 2>/dev/null || echo missing)"
+  [ "${v}" = "13.2.0" ] || { echo "ERROR: ${cc} reports '${v}', need exactly 13.2.0 (eidolon/OW2 pin)"; exit 1; }
+done
+echo "    cross GCC: $(x86_64-w64-mingw32-gcc -dumpfullversion) (i686 + x86_64, xPack)"
 
 echo "==> Downloading source (cache: ${TARBALL})"
 [ -f "${TARBALL}" ] || curl -fL "${SOURCE_URL}" -o "${TARBALL}"
@@ -162,10 +213,13 @@ fi
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"
 export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-Wl,-rpath,@loader_path/../../ -Wl,-rpath,${BREW}/lib"
-# mingw-w64 / gcc 14 defaults to C23, where `bool` is a reserved keyword. Wine 9.0's PE code still
-# uses `bool` as an identifier (e.g. programs/winhlp32/macro.h: `BOOL bool;`), which fails to parse.
-# Build the cross-compiled (PE) side as gnu17 so the pre-C23 meaning holds across all such code.
-export CROSSCFLAGS="-g -O2 -std=gnu17"
+# Pin the PE language to gnu17: GCC 13.2.0 already defaults to it, but keep it explicit so the pre-C23
+# meaning of `bool` (used as an identifier in Wine's PE code, e.g. programs/winhlp32/macro.h:
+# `BOOL bool;`) holds even if a toolchain default ever shifts to C23. NO -g on the PE side: the DWARF
+# debug sections bloated each DLL ~5-10x (SizeOfImage ~8x) for no benefit — eidolon does not key on
+# them (a -g build still deadlocked Overwatch 2), and CrossOver ships its PE DLLs stripped. The strip
+# pass after staging drops the remaining COFF symbol table for full parity and a lean artifact.
+export CROSSCFLAGS="-O2 -std=gnu17"
 
 echo "==> Configuring (new WoW64, i386 + x86_64)"
 mkdir -p "${BUILD}"
@@ -196,6 +250,24 @@ make install
 echo "==> Staging wswine.bundle"
 mkdir -p "${STAGE}"
 cp -R "${WORK}/stage-prefix/." "${STAGE}/"
+
+# Strip the PE modules like CrossOver's release build does. We already compile the PE side without -g,
+# so there are no DWARF sections; --strip-all additionally drops the COFF symbol table (PE exports live
+# in .edata and are preserved), matching CrossOver and keeping the artifact lean. ONLY the PE .dll/.exe
+# are stripped here — the Mach-O unix .so/.dylib are left intact for the ad-hoc signing step below.
+# NOTE: this is for parity/size, NOT the eidolon/OW2 fix (that is the GCC 13.2.0 codegen pinned above;
+# a fully stripped GCC-13.4.0 build still deadlocked).
+echo "==> Stripping PE modules (CrossOver parity, lean artifact)"
+for arch_win in i386-windows x86_64-windows; do
+  win_dir="${STAGE}/lib/wine/${arch_win}"
+  [ -d "${win_dir}" ] || continue
+  case "${arch_win}" in
+    i386-windows)   pe_strip="i686-w64-mingw32-strip" ;;
+    x86_64-windows) pe_strip="x86_64-w64-mingw32-strip" ;;
+  esac
+  find "${win_dir}" -type f \( -name '*.dll' -o -name '*.exe' \) -print0 2>/dev/null \
+    | while IFS= read -r -d '' f; do "${pe_strip}" --strip-all "$f" 2>/dev/null || true; done
+done
 
 # Sanity check that DXMT will find what it needs.
 winemac="$(find "${STAGE}/lib/wine" \( -name 'winemac.drv.so' -o -name 'winemac.so' \) -print -quit 2>/dev/null)"

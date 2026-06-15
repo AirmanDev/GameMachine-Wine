@@ -85,7 +85,15 @@ if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
 
     /* GameMachine: re-add CrossOver's WINEDLLPATH_PREPEND (dropped in CX26) so an external dir
        (the GPTK D3DMetal DLLs) can shadow the engine's builtin DLLs by name. Entries are prepended
-       in reverse so the first listed dir ends up searched first, ahead of dll_dir. */
+       in reverse so the first listed dir ends up searched first, ahead of dll_dir.
+       OWNERSHIP: prepend_dll_path() stores the pointer it is given WITHOUT copying it (it does
+       `dll_paths[0] = path;`), and dll_paths lives for the whole process. So each entry MUST be a
+       persistent allocation — we strdup() it. The earlier version passed pointers INTO a strtok'd
+       buffer that was then free()'d, leaving dll_paths[0..n] dangling into freed memory that
+       set_system_dll_path()/set_home_dir()/set_config_dir() (called right after in init_paths)
+       promptly reused — so the GPTK path was silently clobbered and D3DMetal fell back to the
+       engine's builtin DXMT. The strdup'd copies are intentionally never freed (matches how
+       set_dll_path() strdup's its own WINEDLLPATH entries). */
     if ((path = getenv( "WINEDLLPATH_PREPEND" )) && *path)
     {
         char *gm_path, **gm_entries;
@@ -94,7 +102,7 @@ if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
         gm_entries = malloc( gm_cap * sizeof(*gm_entries) );
         gm_path = strdup( path );
         for (p = strtok( gm_path, ":" ); p; p = strtok( NULL, ":" )) gm_entries[gm_n++] = p;
-        while (gm_n > 0) prepend_dll_path( gm_entries[--gm_n] );
+        while (gm_n > 0) prepend_dll_path( strdup( gm_entries[--gm_n] ) );
         free( gm_entries );
         free( gm_path );
     }

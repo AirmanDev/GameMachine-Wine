@@ -10,12 +10,16 @@ won't load on anything else. CrossOver releases its Wine changes under the LGPL,
 that source and builds a pinned runtime for GameMachine.
 
 The output is one `wswine.bundle` tarball that GameMachine downloads as its "GameMachine Wine" engine.
+The engine carries its own version (currently **v1**); the underlying source is CrossOver 26.2.0 /
+Wine 11, but the artifact and release are named after the GameMachine engine, not the upstream
+release. New engine builds keep the same `v1` name and are tracked by their SHA-256 (the app
+re-downloads when the hash changes); a breaking change would bump to `v2`.
 
 ## Building
 
-The current release target is CrossOver 26.2.0 / Wine 11:
+The v1 engine is built from CrossOver 26.2.0 / Wine 11 source:
 
-    gamemachine-wine-cx26-osx64.tar.xz
+    gamemachine-wine-v1-osx64.tar.xz
 
 The reproducible local build environment is an Apple Silicon Mac running the x86_64 build under
 Rosetta with Xcode 15.4 selected:

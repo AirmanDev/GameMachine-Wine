@@ -59,22 +59,38 @@ directly), the workflow builds the pushed ref, so commit and push `build-wine.sh
 
 Tag pushes intentionally do not trigger a rebuild; the CI image selects Xcode 15.4 defensively.
 
-## PE toolchain is pinned to mingw GCC 13.2.0 (Overwatch 2 / eidolon)
+## PE toolchain: mingw GCC 13.2.0 (CrossOver parity)
 
-The Windows PE DLLs must be built with **mingw-w64 GCC 13.2.0** - CrossOver's exact PE compiler - not a
-newer GCC. Blizzard's `eidolon` anti-tamper (Overwatch 2, and D2R/D4 since Jan 2026) scans the loaded
-Wine modules' in-memory code and dispatches via raised exceptions; it is sensitive to the exact
-codegen. Builds with GCC 15.2.0 **and** 13.4.0 both make an eidolon routine recurse into a stack
-overflow inside `Overwatch_loader.dll`, holding ntdll's `loader_section` so the game deadlocks at
-launch. This was isolated on a real M5 Pro: CrossOver's GCC-13.2.0 PE DLLs dropped into our own engine
-pass eidolon, our GCC-13.4.0 ones don't - even after a full `--strip-all` (so it is not debug info),
-and ntdll's export surface is identical (so it is not an API patch). The minor version matters.
-
-GCC 13.2.0 will not compile from source on a modern macOS SDK (GCC bug #111632), so `build-wine.sh`
-downloads the prebuilt [xPack mingw-w64 GCC 13.2.0](https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/tag/v13.2.0-1)
+The Windows PE DLLs are cross-compiled with **mingw-w64 GCC 13.2.0** - CrossOver's exact PE compiler -
+for parity with CrossOver's lean, stripped release (same toolchain and layout), not because the version
+itself fixes anything. GCC 13.2.0 will not compile from source on a modern macOS SDK (GCC bug #111632),
+so `build-wine.sh` downloads the prebuilt
+[xPack mingw-w64 GCC 13.2.0](https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/tag/v13.2.0-1)
 toolchain (both i686 + x86_64 targets, darwin-x64 so it runs under Rosetta) and hard-fails if the cross
-GCC is anything other than 13.2.0. The PE DLLs are then built without `-g` and `--strip-all`-stripped,
-matching CrossOver's lean, stripped release layout (strip is for parity/size, not the eidolon fix).
+GCC is anything other than 13.2.0 - a deliberate parity guard, kept as the lowest-risk toolchain for the
+anti-tamper-sensitive Blizzard titles. The PE DLLs are built without `-g` and `--strip-all`-stripped,
+matching CrossOver's stripped layout (strip is for parity/size).
+
+This is **not** the anti-tamper fix. An earlier theory blamed the PE GCC version for code-scanning
+anti-tamper under Rosetta (Blizzard's `eidolon` - Overwatch 2, and D2R/D4 since Jan 2026). In practice
+GCC 13.4.0 and 15.2.0 both deadlocked, but so did our own from-source 13.2.0 build, so the version was
+never the actual cause.
+
+## D3DMetal under Rosetta: non-native code-region registration
+
+The actual mitigation is global, not game-specific. The engine carries CrossOver's loader hook
+("CW HACK 22434"), built in from CrossOver's source, and the app sets `CX_APPLEGPTK_LIBD3DSHARED_PATH`
+(the path to the user's imported GPTK `libd3dshared.dylib`) on **every** D3DMetal launch. The hook then
+registers every loaded PE module's code range as a NON-NATIVE region with Rosetta.
+
+That is what lets Rosetta-based anti-tamper which scans loaded module code tolerate the Apple D3DMetal
+ARM64 code instead of treating it as tampering. Blizzard's `eidolon` (Overwatch 2, D2R, D4) is the known
+case - without the registration it recurses into a stack overflow inside the game's loader DLL, holds
+ntdll's `loader_section`, and the process deadlocks at launch - but the mechanism is not game-specific:
+it applies to any title with that kind of protection and is a harmless no-op for the rest. Verified on a
+real M5 Pro with Overwatch 2 (the loader deadlock cleared: 0 stack overflow, 0 `loader_section`
+timeout). The build's only job is to keep the CrossOver loader hook intact; activation is the app's env
+var, not a rebuild.
 
 The release artifact must be self-contained for end users. GStreamer is enabled for Wine media
 paths, but the script fails the build if any native Mach-O module keeps an absolute non-system dylib

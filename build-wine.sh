@@ -15,16 +15,16 @@
 # shared wine-mono (.NET) and wine-gecko (MSHTML) runtimes are bundled into share/wine/{mono,gecko}
 # so a fresh prefix doesn't pop the Wine Mono/Gecko download dialog on first launch (see below).
 # NOTE: this only bundles open-source Wine components. Apple's Game Porting Toolkit (D3DMetal) is
-# NOT bundled — the engine only stays ABI-compatible so the user's own GPTK import can load.
+# NOT bundled - the engine only stays ABI-compatible so the user's own GPTK import can load.
 #
 # Host arch: x86_64. The wine binary translates x86/x64 Windows code and runs under Rosetta on Apple
 # Silicon, the same way CrossOver and GPTK do. Build natively on an Intel runner, or under
 # `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64, cross-compiled with
-# mingw-w64 GCC 13.2.0 (pinned below — CrossOver's exact PE toolchain; see the eidolon/OW2 note).
+# mingw-w64 GCC 13.2.0 (pinned below - CrossOver's exact PE toolchain; see the eidolon/OW2 note).
 #
 # Dependencies (Homebrew on an x86_64 prefix): bison flex gstreamer freetype gnutls sdl2 faudio mpg123
 # libpng jpeg sane-backends libgphoto2 molten-vk pkg-config, plus the Xcode CLT. The mingw-w64 cross
-# compiler is NOT taken from Homebrew (it tracks the latest GCC, which breaks Overwatch 2 — see below);
+# compiler is NOT taken from Homebrew (it tracks the latest GCC, which breaks Overwatch 2 - see below);
 # the pinned xPack GCC 13.2.0 toolchain is downloaded by this script. The configure flags follow
 # Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds; a full Wine build is touchy,
 # so pin dependency versions on the runner and tweak per CrossOver release.
@@ -60,18 +60,18 @@ echo "    brew: ${BREW}"
 # since the Jan 2026 rollout) scans the in-memory CODE of the loaded Wine PE modules and dispatches via
 # raised exceptions. It is sensitive to the exact instruction stream the compiler emits. CrossOver 26
 # builds its PE DLLs with mingw GCC 13.2.0 and OW2 runs; our earlier builds with GCC 15.2.0 AND 13.4.0
-# both make an eidolon routine recurse into a stack overflow inside Overwatch_loader.dll — the dead
+# both make an eidolon routine recurse into a stack overflow inside Overwatch_loader.dll - the dead
 # thread holds ntdll's loader_section, every other thread then times out on it, and the game never
 # starts. Isolated on a real M5 Pro (macOS 26): dropping CrossOver's GCC-13.2.0 PE DLLs into our own
 # engine (our x86_64-unix .so + our wine binary + our prefix + the same Rosetta) makes eidolon PASS,
-# while our GCC-13.4.0 PE DLLs overflow — even after a full --strip-all (so it is NOT debug info /
+# while our GCC-13.4.0 PE DLLs overflow - even after a full --strip-all (so it is NOT debug info /
 # SizeOfImage). ntdll's export surface is byte-for-byte the same count/ordinals in both (so it is NOT
 # an API-adding patch) → it is pure codegen, and the minor version matters (13.2.0 != 13.4.0). So we
 # pin 13.2.0. CodeWeavers (a Blizzard partner) match this toolchain rather than reverse-engineer the
 # obfuscated eidolon; the open-source mitigation is the same. Details: docs/WineBuildStatus.md §13.
 #
 # We can't build GCC 13.2.0 from source on a modern macOS SDK (safe-ctype.h poisons islower/toupper,
-# which the newer libc++ then trips over — GCC bug #111632, fixed only on 13.3+). So we use the xPack
+# which the newer libc++ then trips over - GCC bug #111632, fixed only on 13.3+). So we use the xPack
 # prebuilt mingw-w64 GCC 13.2.0 toolchain (ships BOTH i686 + x86_64 targets), darwin-x64 so it runs
 # natively on an Intel runner and under Rosetta on Apple Silicon. This REPLACES Homebrew's mingw-w64
 # (which tracks the latest GCC) for the PE cross-compilation; the rest of the build is unchanged.
@@ -89,7 +89,7 @@ echo "${XPACK_SHA256}  ${XPACK_CACHE}" | shasum -a 256 -c - >/dev/null \
 if [ ! -x "${XPACK_ROOT}/bin/x86_64-w64-mingw32-gcc" ]; then
   rm -rf "${XPACK_ROOT}"; mkdir -p "${XPACK_ROOT}"
   # The tarball has a single top-level xpack-mingw-w64-gcc-*/ dir; --strip-components=1 drops it so
-  # bin/ lands directly at ${XPACK_ROOT}/bin (deterministic — no find/mv that could double-nest).
+  # bin/ lands directly at ${XPACK_ROOT}/bin (deterministic - no find/mv that could double-nest).
   tar -xzf "${XPACK_CACHE}" -C "${XPACK_ROOT}" --strip-components=1
 fi
 xattr -dr com.apple.quarantine "${XPACK_ROOT}" 2>/dev/null || true
@@ -123,11 +123,11 @@ EOF
 
 # Restore CrossOver's WINEDLLPATH_PREPEND, which CrossOver 26 dropped from the loader. GameMachine's
 # D3DMetal (GPTK) backend relies on it: the GPTK PE DLLs carry the "Wine builtin DLL" signature, so
-# Wine won't load them from the prefix as native — they must shadow the engine's own builtin
+# Wine won't load them from the prefix as native - they must shadow the engine's own builtin
 # d3d11/dxgi/... by being searched FIRST on the builtin DLL path. CX26/upstream only APPEND
 # WINEDLLPATH after the default dll_dir (set_dll_path: dll_dir is pushed before the WINEDLLPATH
 # entries), so a plain WINEDLLPATH never wins. The prepend_dll_path() helper (CW Hack 24067) still
-# exists in the source — we only re-wire the env-var caller into set_dll_path(). Without this the
+# exists in the source - we only re-wire the env-var caller into set_dll_path(). Without this the
 # engine's builtin DXMT always wins and D3DMetal silently never loads. Idempotent (skip if present).
 LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
@@ -139,10 +139,10 @@ if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
        in reverse so the first listed dir ends up searched first, ahead of dll_dir.
        OWNERSHIP: prepend_dll_path() stores the pointer it is given WITHOUT copying it (it does
        `dll_paths[0] = path;`), and dll_paths lives for the whole process. So each entry MUST be a
-       persistent allocation — we strdup() it. The earlier version passed pointers INTO a strtok'd
+       persistent allocation - we strdup() it. The earlier version passed pointers INTO a strtok'd
        buffer that was then free()'d, leaving dll_paths[0..n] dangling into freed memory that
        set_system_dll_path()/set_home_dir()/set_config_dir() (called right after in init_paths)
-       promptly reused — so the GPTK path was silently clobbered and D3DMetal fell back to the
+       promptly reused - so the GPTK path was silently clobbered and D3DMetal fell back to the
        engine's builtin DXMT. The strdup'd copies are intentionally never freed (matches how
        set_dll_path() strdup's its own WINEDLLPATH entries). */
     if ((path = getenv( "WINEDLLPATH_PREPEND" )) && *path)
@@ -163,27 +163,36 @@ CEOF
   grep -q 'WINEDLLPATH_PREPEND' "${LOADER}" || { echo "ERROR: WINEDLLPATH_PREPEND patch did not apply"; exit 1; }
 fi
 
-# GameMachine: Steam's CEF webhelper (steamwebhelper.exe) renders BLACK under winemac with its default
-# ANGLE GL backend. Verified via macdrv/bitblt trace that the present path is fine (both ANGLE and
-# SwiftShader present identically through NtGdiStretchBlt) — ANGLE just emits a black frame. Force the
-# software SwiftShader GL backend on every webhelper launch (the browser process AND its gpu/renderer
-# children, which also go through CreateProcess). Relocates the former per-prefix steamwebhelper.exe
-# wrapper into the engine: no binary swap, automatic for all prefixes. Placed in CreateProcessInternalW
-# right after CrossOver's own app-specific hacks (Epic/powershell), modifying tidy_cmdline (the cmdline
-# actually used downstream; freed at function end). Idempotent (skip if present).
+# GameMachine: CEF (Chromium Embedded Framework) launchers render broken under winemac with their default
+# ANGLE GL backend - Steam's webhelper (steamwebhelper.exe) shows a BLACK frame, and Ubisoft Connect
+# (browser host upc.exe + its UplayWebCore.exe gpu/renderer subprocesses) shows a TRANSPARENT/INVISIBLE
+# window (the CEF render/gpu process crashes; cf. Whisky #502). Verified for Steam via macdrv/bitblt trace
+# that the present path is fine (both ANGLE and SwiftShader present identically through NtGdiStretchBlt) -
+# ANGLE just produces no usable frame; the documented CEF-under-Wine fix is to force the software
+# SwiftShader GL backend + disable GPU compositing. Applied on every CEF launch (the browser process AND
+# its gpu/renderer children, which also go through CreateProcess). Relocates the former per-prefix
+# steamwebhelper.exe wrapper into the engine: no binary swap, automatic for all prefixes. Placed in
+# CreateProcessInternalW right after CrossOver's own app-specific hacks (Epic/powershell), modifying
+# tidy_cmdline (the cmdline actually used downstream; freed at function end). Idempotent (skip if present).
 PROC="${SRC}/dlls/kernelbase/process.c"
 if ! grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}"; then
-  echo "==> Patching process.c: force SwiftShader GL on Steam CEF webhelper (black-UI fix)"
+  echo "==> Patching process.c: force SwiftShader GL on CEF launchers (Steam black-UI + Ubisoft invisible-window fix)"
   cat > "${WORK}/gm-steam-cef.c" <<'CEOF'
-    /* GameMachine HACK: Steam's CEF webhelper (steamwebhelper.exe) renders BLACK under winemac with
-       its default ANGLE GL backend. Verified via macdrv/bitblt trace that the present path is fine
-       (both ANGLE and SwiftShader present identically through NtGdiStretchBlt) — ANGLE just emits a
-       black frame. Force the software SwiftShader GL backend on every webhelper launch (the browser
-       process AND its gpu/renderer children, which also pass through CreateProcess), unless already
-       set. Same flags the standalone prefix wrapper used, relocated into the engine so no per-prefix
-       binary swap is needed. Idempotency marker: --use-gl=swiftshader (Chromium propagates it to
-       children, so we don't double-append). */
-    if (tidy_cmdline && wcsstr( tidy_cmdline, L"steamwebhelper.exe" )
+    /* GameMachine HACK: CEF launchers render broken under winemac with their default ANGLE GL backend -
+       Steam's webhelper (steamwebhelper.exe) shows a BLACK frame (verified via macdrv/bitblt trace: the
+       present path is fine, both ANGLE and SwiftShader present identically through NtGdiStretchBlt -
+       ANGLE just produces no usable frame), and Ubisoft Connect (browser host upc.exe + its
+       UplayWebCore.exe gpu/renderer subprocesses) shows a TRANSPARENT/INVISIBLE window because the CEF
+       render/gpu process crashes (cf. Whisky #502). The documented CEF-under-Wine fix is to force the
+       software SwiftShader GL backend + disable GPU compositing. Applied on every CEF process launch
+       (the browser process AND its gpu/renderer children, which also pass through CreateProcess), unless
+       already set. Same flags the standalone prefix wrapper used, relocated into the engine so no
+       per-prefix binary swap is needed. Idempotency marker: --use-gl=swiftshader (Chromium propagates
+       it to children, so we don't double-append). */
+    if (tidy_cmdline
+        && (wcsstr( tidy_cmdline, L"steamwebhelper.exe" )   /* Steam CEF webhelper (browser + children) */
+            || wcsstr( tidy_cmdline, L"UplayWebCore.exe" )  /* Ubisoft Connect CEF gpu/renderer subprocess */
+            || wcsstr( tidy_cmdline, L"upc.exe" ))          /* Ubisoft Connect CEF browser host */
         && !wcsstr( tidy_cmdline, L"--use-gl=swiftshader" ))
     {
         static const WCHAR gm_cef_flags[] = L" --use-gl=swiftshader --in-process-gpu --no-sandbox --disable-gpu --disable-gpu-compositing";
@@ -196,7 +205,7 @@ if ! grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}"; then
             lstrcpyW( gm_cef_cmd + gm_cef_head, gm_cef_flags );
             if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
             tidy_cmdline = gm_cef_cmd;
-            FIXME( "GameMachine HACK: forcing --use-gl=swiftshader on Steam CEF webhelper\n" );
+            FIXME( "GameMachine HACK: forcing --use-gl=swiftshader on CEF launcher (Steam/Ubisoft)\n" );
         }
     }
 
@@ -213,13 +222,15 @@ fi
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"
 export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-Wl,-rpath,@loader_path/../../ -Wl,-rpath,${BREW}/lib"
-# Pin the PE language to gnu17: GCC 13.2.0 already defaults to it, but keep it explicit so the pre-C23
-# meaning of `bool` (used as an identifier in Wine's PE code, e.g. programs/winhlp32/macro.h:
-# `BOOL bool;`) holds even if a toolchain default ever shifts to C23. NO -g on the PE side: the DWARF
-# debug sections bloated each DLL ~5-10x (SizeOfImage ~8x) for no benefit — eidolon does not key on
-# them (a -g build still deadlocked Overwatch 2), and CrossOver ships its PE DLLs stripped. The strip
-# pass after staging drops the remaining COFF symbol table for full parity and a lean artifact.
-export CROSSCFLAGS="-O2 -std=gnu17"
+# PE cross-flags: do NOT override CROSSCFLAGS - let Wine's configure pick its own default cross-flags.
+# WHY (Overwatch 2 / eidolon): our earlier minimal override "-O2 -std=gnu17" REPLACED Wine's configure-
+# chosen defaults, and the resulting from-source GCC-13.2.0 build STILL deadlocked OW2's eidolon, while
+# CrossOver's own GCC-13.2.0 PE DLLs pass in the very same engine - so the codegen differs despite the
+# same GCC version. CrossOver builds from this same Wine configure WITHOUT overriding CROSSCFLAGS, so we
+# match that and let configure choose. The GCC 13.2.0 pin above guarantees the C default is gnu17, so
+# Wine PE code that uses `bool` as an identifier (e.g. programs/winhlp32/macro.h: `BOOL bool;`) still
+# parses without an explicit -std. Wine's PE default omits -g, and we --strip-all after staging anyway.
+unset CROSSCFLAGS
 
 echo "==> Configuring (new WoW64, i386 + x86_64)"
 mkdir -p "${BUILD}"
@@ -254,7 +265,7 @@ cp -R "${WORK}/stage-prefix/." "${STAGE}/"
 # Strip the PE modules like CrossOver's release build does. We already compile the PE side without -g,
 # so there are no DWARF sections; --strip-all additionally drops the COFF symbol table (PE exports live
 # in .edata and are preserved), matching CrossOver and keeping the artifact lean. ONLY the PE .dll/.exe
-# are stripped here — the Mach-O unix .so/.dylib are left intact for the ad-hoc signing step below.
+# are stripped here - the Mach-O unix .so/.dylib are left intact for the ad-hoc signing step below.
 # NOTE: this is for parity/size, NOT the eidolon/OW2 fix (that is the GCC 13.2.0 codegen pinned above;
 # a fully stripped GCC-13.4.0 build still deadlocked).
 echo "==> Stripping PE modules (CrossOver parity, lean artifact)"
@@ -283,7 +294,7 @@ fi
 # are NOT part of the Wine source tree (they are separate prebuilt packages), so a from-source
 # build omits them unless we add them here, exactly like the Gcenx/CrossOver macOS packages do.
 # The versions are read from the very source we compile (dlls/appwiz.cpl/addons.c) so they always
-# match the engine and auto-track a CrossOver bump — no hardcoding. mscoree looks for the runtime
+# match the engine and auto-track a CrossOver bump - no hardcoding. mscoree looks for the runtime
 # at share/wine/mono/wine-mono-<MONO_VERSION>/ and mshtml at share/wine/gecko/wine-gecko-<ver>-<arch>/.
 echo "==> Bundling wine-mono + wine-gecko (offline .NET/Gecko, no first-launch download prompt)"
 ADDONS="${SRC}/dlls/appwiz.cpl/addons.c"
@@ -296,7 +307,7 @@ MONO_DIR="${STAGE}/share/wine/mono"
 GECKO_DIR="${STAGE}/share/wine/gecko"
 mkdir -p "${MONO_DIR}" "${GECKO_DIR}"
 
-fetch() {  # url cache_path  — download once, reuse on re-runs (like the source tarball)
+fetch() {  # url cache_path  - download once, reuse on re-runs (like the source tarball)
   [ -f "$2" ] || curl -fL "$1" -o "$2"
 }
 

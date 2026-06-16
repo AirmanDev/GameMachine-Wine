@@ -7,7 +7,7 @@ on:
         description: CrossOver source version
         default: "26.2.0"
       build_tag:
-        description: Release tag (the app pins this — keep "v1")
+        description: Release tag (the app pins this - keep "v1")
         default: "v1"
 
 # macos-14 is arm64 but ships Xcode 15.4 (clang 15), which does not have the Xcode 16+ integrated
@@ -39,7 +39,7 @@ jobs:
         # collide with Homebrew's python (pulled in by gstreamer) and break `brew link`. Documented
         # GitHub Actions fix (actions/runner-images #8529, #9966): delete those framework symlinks
         # first, then install with --overwrite so any remaining collision is resolved.
-        # NOTE: no mingw-w64 here — the PE cross-compiler is the pinned xPack GCC 13.2.0 that
+        # NOTE: no mingw-w64 here - the PE cross-compiler is the pinned xPack GCC 13.2.0 that
         # build-wine.sh downloads (Homebrew's mingw-w64 tracks the latest GCC, which breaks Overwatch 2).
         env:
           HOMEBREW_NO_ENV_HINTS: "1"

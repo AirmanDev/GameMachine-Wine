@@ -15,40 +15,59 @@ Wine 11, but the artifact and release are named after the GameMachine engine, no
 release. New engine builds keep the same `v1` name and are tracked by their SHA-256 (the app
 re-downloads when the hash changes); a breaking change would bump to `v2`.
 
-## Building
+## Building locally (Apple Silicon)
 
-The v1 engine is built from CrossOver 26.2.0 / Wine 11 source:
+The engine is an x86_64 Wine that runs under Rosetta, so it is built as x86_64 too. This is the
+primary, reproducible path on an Apple Silicon Mac; the GitHub workflow below just mirrors it on a
+clean runner. Output: `gamemachine-wine-v1-osx64.tar.xz` (CrossOver 26.2.0 / Wine 11 source).
 
-    gamemachine-wine-v1-osx64.tar.xz
+One-time setup - an x86_64 Homebrew under `/usr/local` (the Rosetta brew) plus the build deps:
 
-The reproducible local build environment is an Apple Silicon Mac running the x86_64 build under
-Rosetta with Xcode 15.4 selected:
+    arch -x86_64 /usr/local/bin/brew install bison flex pkg-config \
+        freetype gnutls gstreamer sdl2 faudio mpg123 libpng vulkan-loader
 
-    arch -x86_64 env \
-      DEVELOPER_DIR=/Applications/Xcode-15.4.0.app/Contents/Developer \
-      HOMEBREW_PREFIX=/usr/local \
-      ./build-wine.sh
+Build, from the repo root. The script downloads everything else it needs into `/tmp` and caches it
+for re-runs - the CrossOver source tarball and the pinned xPack mingw GCC 13.2.0 toolchain - so no
+mingw-w64 from Homebrew:
 
-The GitHub workflow is intentionally manual (`workflow_dispatch` only). Do not rely on tag pushes to
-rebuild Wine: local builds are faster to inspect, and the release asset can be uploaded with
-`gh release upload --clobber` after validation. The workflow still uses `macos-14` when run manually
-because that image provides the arm64 runner shape we need and can select Xcode 15.4. Newer images are
-not automatically better for this build; Xcode 16+ currently trips Wine's x86_64 CFI assembler path.
+    arch -x86_64 env HOMEBREW_PREFIX=/usr/local ./build-wine.sh
 
-Dependencies (x86_64 Homebrew under `/usr/local`): bison, flex, pkg-config, freetype, gnutls,
-gstreamer, sdl2, faudio, mpg123, libpng, and vulkan-loader. A full Wine build is sensitive to the host
+To make the app pick up a fresh build, copy its hash into `AppConstants.gamemachineWineArchiveSHA256`
+(the app re-downloads when the hash changes), and upload the asset to the `v1` release if you
+distribute it:
+
+    shasum -a 256 gamemachine-wine-v1-osx64.tar.xz
+    gh release upload v1 gamemachine-wine-v1-osx64.tar.xz --clobber
+
+Xcode: the current Command Line Tools work for this build. Only if it stops in `signal_x86_64.c` with
+a CFI assembler error (seen on some Xcode 16+ toolchains) select Xcode 15.4 for the run by prefixing
+`DEVELOPER_DIR=/Applications/Xcode-15.4.0.app/Contents/Developer`.
+
+Dependencies recap (x86_64 Homebrew under `/usr/local`): bison, flex, pkg-config, freetype, gnutls,
+gstreamer, sdl2, faudio, mpg123, libpng, vulkan-loader. A full Wine build is sensitive to the host
 setup, so pin dependency versions and adjust configure flags per CrossOver release. The mingw-w64 PE
-cross-compiler is **not** taken from Homebrew — see the toolchain pin below.
+cross-compiler is **not** taken from Homebrew - see the toolchain pin below.
+
+## Building via GitHub Actions (optional)
+
+The workflow is manual only (`workflow_dispatch`) and mirrors the local build on a `macos-14` runner,
+then uploads the artifact to the `v1` release. Unlike a local build (which uses the working tree
+directly), the workflow builds the pushed ref, so commit and push `build-wine.sh` first:
+
+    gh workflow run build.yml -f cx_version=26.2.0 -f build_tag=v1
+    gh run watch
+
+Tag pushes intentionally do not trigger a rebuild; the CI image selects Xcode 15.4 defensively.
 
 ## PE toolchain is pinned to mingw GCC 13.2.0 (Overwatch 2 / eidolon)
 
-The Windows PE DLLs must be built with **mingw-w64 GCC 13.2.0** — CrossOver's exact PE compiler — not a
+The Windows PE DLLs must be built with **mingw-w64 GCC 13.2.0** - CrossOver's exact PE compiler - not a
 newer GCC. Blizzard's `eidolon` anti-tamper (Overwatch 2, and D2R/D4 since Jan 2026) scans the loaded
 Wine modules' in-memory code and dispatches via raised exceptions; it is sensitive to the exact
 codegen. Builds with GCC 15.2.0 **and** 13.4.0 both make an eidolon routine recurse into a stack
 overflow inside `Overwatch_loader.dll`, holding ntdll's `loader_section` so the game deadlocks at
 launch. This was isolated on a real M5 Pro: CrossOver's GCC-13.2.0 PE DLLs dropped into our own engine
-pass eidolon, our GCC-13.4.0 ones don't — even after a full `--strip-all` (so it is not debug info),
+pass eidolon, our GCC-13.4.0 ones don't - even after a full `--strip-all` (so it is not debug info),
 and ntdll's export surface is identical (so it is not an API patch). The minor version matters.
 
 GCC 13.2.0 will not compile from source on a modern macOS SDK (GCC bug #111632), so `build-wine.sh`

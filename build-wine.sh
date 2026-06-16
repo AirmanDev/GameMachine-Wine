@@ -19,13 +19,13 @@
 #
 # Host arch: x86_64. The wine binary translates x86/x64 Windows code and runs under Rosetta on Apple
 # Silicon, the same way CrossOver and GPTK do. Build natively on an Intel runner, or under
-# `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64, cross-compiled with
-# mingw-w64 GCC 13.2.0 (pinned below - CrossOver's exact PE toolchain; see the eidolon/OW2 note).
+# `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64, cross-compiled with the
+# xPack mingw-w64 GCC toolchain pinned by MINGW_GCC_VERSION below (currently 15.2.0; see the note).
 #
 # Dependencies (Homebrew on an x86_64 prefix): bison flex gstreamer freetype gnutls sdl2 faudio mpg123
 # libpng jpeg sane-backends libgphoto2 molten-vk pkg-config, plus the Xcode CLT. The mingw-w64 cross
-# compiler is NOT taken from Homebrew (it tracks the latest GCC, which breaks Overwatch 2 - see below);
-# the pinned xPack GCC 13.2.0 toolchain is downloaded by this script. The configure flags follow
+# compiler is NOT taken from Homebrew (it tracks whatever GCC is current); this script downloads an
+# exact, SHA-pinned xPack GCC toolchain so the PE build is reproducible. The configure flags follow
 # Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds; a full Wine build is touchy,
 # so pin dependency versions on the runner and tweak per CrossOver release.
 #
@@ -55,34 +55,37 @@ echo "==> Building Wine from CrossOver ${CX_VERSION} (tag ${BUILD_TAG})"
 echo "    work: ${WORK}"
 echo "    brew: ${BREW}"
 
-# --- mingw-w64 cross-compiler: pin to GCC 13.2.0 (CrossOver's exact PE toolchain) -----------------
-# WHY 13.2.0 EXACTLY (not just "GCC 13.x"): Blizzard's "eidolon" anti-tamper (Overwatch 2, and D2R/D4
-# since the Jan 2026 rollout) scans the in-memory CODE of the loaded Wine PE modules and dispatches via
-# raised exceptions. It is sensitive to the exact instruction stream the compiler emits. CrossOver 26
-# builds its PE DLLs with mingw GCC 13.2.0 and OW2 runs; our earlier builds with GCC 15.2.0 AND 13.4.0
-# both make an eidolon routine recurse into a stack overflow inside Overwatch_loader.dll - the dead
-# thread holds ntdll's loader_section, every other thread then times out on it, and the game never
-# starts. Isolated on a real M5 Pro (macOS 26): dropping CrossOver's GCC-13.2.0 PE DLLs into our own
-# engine (our x86_64-unix .so + our wine binary + our prefix + the same Rosetta) makes eidolon PASS,
-# while our GCC-13.4.0 PE DLLs overflow - even after a full --strip-all (so it is NOT debug info /
-# SizeOfImage). ntdll's export surface is byte-for-byte the same count/ordinals in both (so it is NOT
-# an API-adding patch) → it is pure codegen, and the minor version matters (13.2.0 != 13.4.0). So we
-# pin 13.2.0. CodeWeavers (a Blizzard partner) match this toolchain rather than reverse-engineer the
-# obfuscated eidolon; the open-source mitigation is the same. Details: docs/WineBuildStatus.md §13.
+# --- mingw-w64 cross-compiler: xPack GCC toolchain (version pinned, currently 15.2.0) -------------
+# The Windows PE DLLs are cross-compiled with the xPack prebuilt mingw-w64 GCC. We pin an EXACT version
+# (SHA-checked) and download it here instead of Homebrew's mingw-w64 (which tracks whatever GCC is
+# current) so the PE build is reproducible. To change toolchains, flip MINGW_GCC_VERSION + XPACK_RELEASE
+# + XPACK_SHA256 together (XPACK_HOST stays darwin-x64 for the Rosetta build).
 #
-# We can't build GCC 13.2.0 from source on a modern macOS SDK (safe-ctype.h poisons islower/toupper,
-# which the newer libc++ then trips over - GCC bug #111632, fixed only on 13.3+). So we use the xPack
-# prebuilt mingw-w64 GCC 13.2.0 toolchain (ships BOTH i686 + x86_64 targets), darwin-x64 so it runs
-# natively on an Intel runner and under Rosetta on Apple Silicon. This REPLACES Homebrew's mingw-w64
-# (which tracks the latest GCC) for the PE cross-compilation; the rest of the build is unchanged.
-XPACK_TAG="${XPACK_TAG:-v13.2.0-1}"
-XPACK_ARCHIVE="xpack-mingw-w64-gcc-13.2.0-1-darwin-x64.tar.gz"
-XPACK_SHA256="9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae"
+# WHY 15.2.0 NOW (and why 13.2.0 was pinned before): we used to pin 13.2.0 as "CrossOver's exact PE
+# compiler", on the theory that Blizzard's "eidolon" anti-tamper (Overwatch 2, D2R, D4) was sensitive
+# to the exact PE codegen. That theory was WRONG. The real eidolon fix is the CrossOver loader hook
+# ("CW HACK 22434") compiled into this engine plus the app's CX_APPLEGPTK_LIBD3DSHARED_PATH env, which
+# registers every loaded PE code range as NON-NATIVE with Rosetta (docs/WineBuildStatus.md §13). With
+# that in place, our own from-source 13.2.0 build, the 13.4.0 build AND the 15.2.0 build all behaved
+# the same way regarding eidolon - so the GCC version was never the cause. We therefore test the latest
+# xPack GCC (15.2.0) and verify on a real machine. To fall back to the 13.2.0 CrossOver-parity
+# toolchain, set:
+#   MINGW_GCC_VERSION=13.2.0 XPACK_RELEASE=13.2.0-1 \
+#   XPACK_SHA256=9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae ./build-wine.sh
+#
+# The xPack tarball ships BOTH i686 + x86_64 targets; XPACK_HOST=darwin-x64 runs natively on an Intel
+# runner and under Rosetta on Apple Silicon (the whole build runs under `arch -x86_64`).
+MINGW_GCC_VERSION="${MINGW_GCC_VERSION:-15.2.0}"
+XPACK_RELEASE="${XPACK_RELEASE:-15.2.0-2}"          # xPack release suffix (GCC version + xPack revision)
+XPACK_HOST="${XPACK_HOST:-darwin-x64}"
+XPACK_SHA256="${XPACK_SHA256:-f82340a331b932bdb285ddd2d7861a1d5405c80ebf09dd3308aca60637ad418c}"
+XPACK_TAG="${XPACK_TAG:-v${XPACK_RELEASE}}"
+XPACK_ARCHIVE="xpack-mingw-w64-gcc-${XPACK_RELEASE}-${XPACK_HOST}.tar.gz"
 XPACK_URL="https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/download/${XPACK_TAG}/${XPACK_ARCHIVE}"
 XPACK_CACHE="${XPACK_CACHE:-/tmp/${XPACK_ARCHIVE}}"
-XPACK_ROOT="${XPACK_ROOT:-/tmp/xpack-mingw-w64-gcc-13.2.0-1}"
+XPACK_ROOT="${XPACK_ROOT:-/tmp/xpack-mingw-w64-gcc-${XPACK_RELEASE}}"
 
-echo "==> Ensuring xPack mingw-w64 GCC 13.2.0 (CrossOver PE toolchain)"
+echo "==> Ensuring xPack mingw-w64 GCC ${MINGW_GCC_VERSION} (PE cross-compiler)"
 [ -f "${XPACK_CACHE}" ] || curl -fL "${XPACK_URL}" -o "${XPACK_CACHE}"
 echo "${XPACK_SHA256}  ${XPACK_CACHE}" | shasum -a 256 -c - >/dev/null \
   || { echo "ERROR: xPack toolchain SHA-256 mismatch for ${XPACK_CACHE}"; exit 1; }
@@ -95,11 +98,11 @@ fi
 xattr -dr com.apple.quarantine "${XPACK_ROOT}" 2>/dev/null || true
 export PATH="${XPACK_ROOT}/bin:${PATH}"
 
-# Hard pin: both PE target compilers must be EXACTLY 13.2.0 (see the eidolon note above). Fail loudly
-# so toolchain drift can never silently reintroduce the Overwatch 2 loader deadlock.
+# Hard pin: both PE target compilers must be EXACTLY ${MINGW_GCC_VERSION}. Fail loudly so a wandering
+# Homebrew/PATH mingw-w64 can never silently swap the toolchain out from under the build.
 for cc in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
   v="$("${cc}" -dumpfullversion 2>/dev/null || echo missing)"
-  [ "${v}" = "13.2.0" ] || { echo "ERROR: ${cc} reports '${v}', need exactly 13.2.0 (eidolon/OW2 pin)"; exit 1; }
+  [ "${v}" = "${MINGW_GCC_VERSION}" ] || { echo "ERROR: ${cc} reports '${v}', need exactly ${MINGW_GCC_VERSION}"; exit 1; }
 done
 echo "    cross GCC: $(x86_64-w64-mingw32-gcc -dumpfullversion) (i686 + x86_64, xPack)"
 
@@ -217,20 +220,55 @@ CEOF
   grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}" || { echo "ERROR: Steam CEF patch did not apply"; exit 1; }
 fi
 
+# GameMachine: Disable Metal HUD on launcher processes at the UNIX level.
+# Apple's Metal Performance HUD is forced onto any window created by a process with MTL_HUD_ENABLED=1.
+# For store launchers (Steam, Epic, Ubisoft), this pollutes the CEF/web UI.
+# By unsetting it in the UNIX environment inside ntdll/unix/loader.c immediately AFTER init_environment(),
+# the Windows environment block retains the variable (so games inherit it), but the macOS Metal framework
+# won't see it on the launcher process.
+LOADER_UNIX="${SRC}/dlls/ntdll/unix/loader.c"
+if ! grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}"; then
+  echo "==> Patching loader.c: disable Metal HUD on launcher processes"
+  cat > "${WORK}/gm-hud-disable.c" <<'CEOF'
+
+    /* GameMachine HACK: Disable Metal HUD on launcher processes at the UNIX level. */
+    {
+        extern int *_NSGetArgc(void);
+        extern char ***_NSGetArgv(void);
+        int gm_argc = *_NSGetArgc();
+        char **gm_argv = *_NSGetArgv();
+        int gm_i;
+        for (gm_i = 0; gm_i < gm_argc; gm_i++) {
+            if (gm_argv[gm_i] && (strstr(gm_argv[gm_i], "steam.exe") || strstr(gm_argv[gm_i], "steamwebhelper.exe") ||
+                                  strstr(gm_argv[gm_i], "EpicGamesLauncher.exe") || strstr(gm_argv[gm_i], "upc.exe") ||
+                                  strstr(gm_argv[gm_i], "UplayWebCore.exe")))
+            {
+                unsetenv("MTL_HUD_ENABLED");
+                break;
+            }
+        }
+    }
+CEOF
+  GM_BLOCK="${WORK}/gm-hud-disable.c" perl -0777 -i -pe '
+    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
+    s/(init_environment\s*\([^\)]*\)\s*;)/$1\n$b/g;
+  ' "${LOADER_UNIX}"
+  grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}" || { echo "ERROR: Metal HUD patch did not apply"; exit 1; }
+fi
+
 # Keep winemac.drv symbols visible for DXMT. CrossOver already exports them; default visibility makes
 # sure a toolchain default of -fvisibility=hidden can't strip the Metal bridge.
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"
 export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-Wl,-rpath,@loader_path/../../ -Wl,-rpath,${BREW}/lib"
-# PE cross-flags: do NOT override CROSSCFLAGS - let Wine's configure pick its own default cross-flags.
-# WHY (Overwatch 2 / eidolon): our earlier minimal override "-O2 -std=gnu17" REPLACED Wine's configure-
-# chosen defaults, and the resulting from-source GCC-13.2.0 build STILL deadlocked OW2's eidolon, while
-# CrossOver's own GCC-13.2.0 PE DLLs pass in the very same engine - so the codegen differs despite the
-# same GCC version. CrossOver builds from this same Wine configure WITHOUT overriding CROSSCFLAGS, so we
-# match that and let configure choose. The GCC 13.2.0 pin above guarantees the C default is gnu17, so
-# Wine PE code that uses `bool` as an identifier (e.g. programs/winhlp32/macro.h: `BOOL bool;`) still
-# parses without an explicit -std. Wine's PE default omits -g, and we --strip-all after staging anyway.
-unset CROSSCFLAGS
+# PE cross-flags: force C17 on the PE side. GCC 15 defaults to C23 (-std=gnu23), where `bool` is a
+# reserved keyword, so Wine PE code that still uses `bool` as an identifier (e.g.
+# programs/winhlp32/macro.h: `BOOL bool;`) fails to compile. Pinning -std=gnu17 restores the GCC-13/14
+# default and keeps the PE side compiling on the newer toolchain. We omit -g (Wine's PE default does
+# too) and --strip-all after staging anyway. NOTE: setting CROSSCFLAGS replaces Wine's configure-chosen
+# default cross-flags; the earlier worry that this changes codegen and breaks OW2/eidolon is moot - the
+# eidolon fix is the CW HACK 22434 loader hook + CX_APPLEGPTK env, not PE codegen (see the GCC note above).
+export CROSSCFLAGS="-O2 -std=gnu17"
 
 echo "==> Configuring (new WoW64, i386 + x86_64)"
 mkdir -p "${BUILD}"
@@ -262,13 +300,13 @@ echo "==> Staging wswine.bundle"
 mkdir -p "${STAGE}"
 cp -R "${WORK}/stage-prefix/." "${STAGE}/"
 
-# Strip the PE modules like CrossOver's release build does. We already compile the PE side without -g,
-# so there are no DWARF sections; --strip-all additionally drops the COFF symbol table (PE exports live
-# in .edata and are preserved), matching CrossOver and keeping the artifact lean. ONLY the PE .dll/.exe
-# are stripped here - the Mach-O unix .so/.dylib are left intact for the ad-hoc signing step below.
-# NOTE: this is for parity/size, NOT the eidolon/OW2 fix (that is the GCC 13.2.0 codegen pinned above;
-# a fully stripped GCC-13.4.0 build still deadlocked).
-echo "==> Stripping PE modules (CrossOver parity, lean artifact)"
+# Strip the PE modules to keep the artifact lean. We already compile the PE side without -g, so there
+# are no DWARF sections; --strip-all additionally drops the COFF symbol table (PE exports live in .edata
+# and are preserved), which shrinks the download. ONLY the PE .dll/.exe are stripped here - the Mach-O
+# unix .so/.dylib are left intact for the ad-hoc signing step below. NOTE: stripping is purely a size
+# optimization, NOT an anti-tamper fix - the eidolon/OW2 mitigation is the CW HACK 22434 loader hook +
+# CX_APPLEGPTK env, independent of the PE toolchain (see the GCC note above).
+echo "==> Stripping PE modules (lean artifact)"
 for arch_win in i386-windows x86_64-windows; do
   win_dir="${STAGE}/lib/wine/${arch_win}"
   [ -d "${win_dir}" ] || continue

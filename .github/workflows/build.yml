@@ -39,8 +39,9 @@ jobs:
         # collide with Homebrew's python (pulled in by gstreamer) and break `brew link`. Documented
         # GitHub Actions fix (actions/runner-images #8529, #9966): delete those framework symlinks
         # first, then install with --overwrite so any remaining collision is resolved.
-        # NOTE: no mingw-w64 here - the PE cross-compiler is the pinned xPack GCC 13.2.0 that
-        # build-wine.sh downloads (Homebrew's mingw-w64 tracks the latest GCC, which breaks Overwatch 2).
+        # NOTE: no mingw-w64 here - the PE cross-compiler is the pinned xPack GCC that build-wine.sh
+        # downloads (version set by MINGW_GCC_VERSION in the script; Homebrew's mingw-w64 would track
+        # whatever GCC is current, defeating the pin).
         env:
           HOMEBREW_NO_ENV_HINTS: "1"
         run: |

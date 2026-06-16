@@ -27,8 +27,8 @@ One-time setup - an x86_64 Homebrew under `/usr/local` (the Rosetta brew) plus t
         freetype gnutls gstreamer sdl2 faudio mpg123 libpng vulkan-loader
 
 Build, from the repo root. The script downloads everything else it needs into `/tmp` and caches it
-for re-runs - the CrossOver source tarball and the pinned xPack mingw GCC 13.2.0 toolchain - so no
-mingw-w64 from Homebrew:
+for re-runs - the CrossOver source tarball and the pinned xPack mingw GCC toolchain (currently 15.2.0,
+see the toolchain section below) - so no mingw-w64 from Homebrew:
 
     arch -x86_64 env HOMEBREW_PREFIX=/usr/local ./build-wine.sh
 
@@ -59,22 +59,26 @@ directly), the workflow builds the pushed ref, so commit and push `build-wine.sh
 
 Tag pushes intentionally do not trigger a rebuild; the CI image selects Xcode 15.4 defensively.
 
-## PE toolchain: mingw GCC 13.2.0 (CrossOver parity)
+## PE toolchain: xPack mingw GCC (pinned, currently 15.2.0)
 
-The Windows PE DLLs are cross-compiled with **mingw-w64 GCC 13.2.0** - CrossOver's exact PE compiler -
-for parity with CrossOver's lean, stripped release (same toolchain and layout), not because the version
-itself fixes anything. GCC 13.2.0 will not compile from source on a modern macOS SDK (GCC bug #111632),
-so `build-wine.sh` downloads the prebuilt
-[xPack mingw-w64 GCC 13.2.0](https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/tag/v13.2.0-1)
-toolchain (both i686 + x86_64 targets, darwin-x64 so it runs under Rosetta) and hard-fails if the cross
-GCC is anything other than 13.2.0 - a deliberate parity guard, kept as the lowest-risk toolchain for the
-anti-tamper-sensitive Blizzard titles. The PE DLLs are built without `-g` and `--strip-all`-stripped,
-matching CrossOver's stripped layout (strip is for parity/size).
+The Windows PE DLLs are cross-compiled with the prebuilt
+[xPack mingw-w64 GCC](https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases) toolchain
+(both i686 + x86_64 targets, `darwin-x64` so it runs under Rosetta). `build-wine.sh` downloads an exact,
+SHA-checked version and hard-fails if the cross GCC is anything else - the version is set by the
+`MINGW_GCC_VERSION` / `XPACK_RELEASE` / `XPACK_SHA256` vars at the top of the script, so it is a single
+place to change. The PE DLLs are built without `-g` and `--strip-all`-stripped (CrossOver's lean layout,
+for parity/size). GCC 15 defaults to C23, so the script pins `CROSSCFLAGS=-std=gnu17` on the PE side -
+without it Wine PE code that uses `bool` as an identifier (e.g. `programs/winhlp32/macro.h`) won't compile.
 
-This is **not** the anti-tamper fix. An earlier theory blamed the PE GCC version for code-scanning
-anti-tamper under Rosetta (Blizzard's `eidolon` - Overwatch 2, and D2R/D4 since Jan 2026). In practice
-GCC 13.4.0 and 15.2.0 both deadlocked, but so did our own from-source 13.2.0 build, so the version was
-never the actual cause.
+The GCC version is **not** the anti-tamper fix. We previously pinned **13.2.0** ("CrossOver's exact PE
+compiler") on a theory that the exact PE codegen mattered for code-scanning anti-tamper under Rosetta
+(Blizzard's `eidolon` - Overwatch 2, D2R, D4). That theory was wrong: with the real fix in place (the
+loader hook below) our 13.2.0, 13.4.0 and 15.2.0 builds all behave the same, so the version never
+mattered. We now build with the latest GCC (15.2.0) and verify on a real machine. To fall back to the
+13.2.0 CrossOver-parity toolchain, run:
+
+    MINGW_GCC_VERSION=13.2.0 XPACK_RELEASE=13.2.0-1 \
+        XPACK_SHA256=9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae ./build-wine.sh
 
 ## D3DMetal under Rosetta: non-native code-region registration
 

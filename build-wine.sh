@@ -1,36 +1,5 @@
 #!/bin/sh
-# Builds Wine for GameMachine from CrossOver's published source.
-#
-# Why this exists: DXMT needs the winemac.drv Metal entry points (the macdrv_* symbols declared in
-# dlls/winemac.drv/winemacdrv.h) to be exported. A stock build hides them with -fvisibility=hidden,
-# so DXMT can't find them at runtime and bails out with "no exported symbols needed by DXMT".
-# Apple's D3DMetal is a separate problem: it is built against CrossOver's unixlib ABI and won't load
-# on a non-CrossOver Wine. CrossOver's Wine changes are LGPL and published, so we compile that source
-# with the symbols left visible. That covers both cases at once.
-#
-# What it produces: a self-contained wswine.bundle with new WoW64 (one x86_64 host that runs both
-# 32-bit and 64-bit Windows code), winemac symbols visible, and msync (the source already carries it;
-# the app toggles it with WINEMSYNC at runtime). The bundle layout is bin/wine, bin/wineserver,
-# lib/wine/{i386-windows,x86_64-windows,x86_64-unix}/... which is what GameMachine looks for. The
-# shared wine-mono (.NET) and wine-gecko (MSHTML) runtimes are bundled into share/wine/{mono,gecko}
-# so a fresh prefix doesn't pop the Wine Mono/Gecko download dialog on first launch (see below).
-# NOTE: this only bundles open-source Wine components. Apple's Game Porting Toolkit (D3DMetal) is
-# NOT bundled - the engine only stays ABI-compatible so the user's own GPTK import can load.
-#
-# Host arch: x86_64. The wine binary translates x86/x64 Windows code and runs under Rosetta on Apple
-# Silicon, the same way CrossOver and GPTK do. Build natively on an Intel runner, or under
-# `arch -x86_64` on Apple Silicon. The PE modules are Windows i386/x86_64, cross-compiled with the
-# xPack mingw-w64 GCC toolchain pinned by MINGW_GCC_VERSION below (currently 15.2.0; see the note).
-#
-# Dependencies (Homebrew on an x86_64 prefix): bison flex gstreamer freetype gnutls sdl2 faudio mpg123
-# libpng jpeg sane-backends libgphoto2 molten-vk pkg-config, plus the Xcode CLT. The mingw-w64 cross
-# compiler is NOT taken from Homebrew (it tracks whatever GCC is current); this script downloads an
-# exact, SHA-pinned xPack GCC toolchain so the PE build is reproducible. The configure flags follow
-# Apple's game-porting-toolkit formula and the Gcenx macOS Wine builds; a full Wine build is touchy,
-# so pin dependency versions on the runner and tweak per CrossOver release.
-#
-# Output: ./gamemachine-wine-v1-osx64.tar.xz (CrossOver 26 / Wine 11, the GPTK 4.0-capable base).
-# The workflow uploads it to the v1 release.
+# Builds the GameMachine Wine runtime from CodeWeavers' published CrossOver source.
 set -eu
 
 CX_VERSION="${CX_VERSION:-26.2.0}"
@@ -38,36 +7,13 @@ BUILD_TAG="${BUILD_TAG:-v1}"
 OUTPUT_NAME="${OUTPUT_NAME:-gamemachine-wine-v1-osx64.tar.xz}"
 MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 SOURCE_URL="${SOURCE_URL:-https://media.codeweavers.com/pub/crossover/source/crossover-sources-${CX_VERSION}.tar.gz}"
-JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+SOURCE_SHA256="${SOURCE_SHA256:-}"
+JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 OUT_DIR="${OUT_DIR:-$(pwd -P)}"
+KEEP_WORK="${KEEP_WORK:-0}"
 
-WORK="$(mktemp -d /tmp/gm-wine-build.XXXXXX)"
-STAGE="${WORK}/stage/wswine.bundle"
-SRC="${WORK}/sources/wine"          # wine tree inside the CrossOver source bundle
-BUILD="${WORK}/build"
-TARBALL="${TARBALL_CACHE:-/tmp/crossover-sources-${CX_VERSION}.tar.gz}"  # cached download
-export MACOSX_DEPLOYMENT_TARGET
-
-BREW="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /usr/local)}"
-export PATH="${BREW}/opt/bison/bin:${BREW}/opt/flex/bin:${BREW}/bin:${PATH}"
-
-echo "==> Building Wine from CrossOver ${CX_VERSION} (tag ${BUILD_TAG})"
-echo "    work: ${WORK}"
-echo "    brew: ${BREW}"
-
-# --- mingw-w64 cross-compiler: xPack GCC toolchain (version pinned, currently 15.2.0) -------------
-# The Windows PE DLLs are cross-compiled with the xPack prebuilt mingw-w64 GCC. We pin an EXACT version
-# (SHA-checked) and download it here instead of Homebrew's mingw-w64 (which tracks whatever GCC is
-# current) so the PE build is reproducible. To change toolchains, flip MINGW_GCC_VERSION + XPACK_RELEASE
-# + XPACK_SHA256 together (XPACK_HOST stays darwin-x64 for the Rosetta build).
-#
-# The GCC version is NOT the anti-tamper fix (the real fix is the CW HACK 22434 loader hook).
-# We use the latest xPack GCC (15.2.0), validated on a real machine.
-#
-# The xPack tarball ships BOTH i686 + x86_64 targets; XPACK_HOST=darwin-x64 runs natively on an Intel
-# runner and under Rosetta on Apple Silicon (the whole build runs under `arch -x86_64`).
 MINGW_GCC_VERSION="${MINGW_GCC_VERSION:-15.2.0}"
-XPACK_RELEASE="${XPACK_RELEASE:-15.2.0-2}"          # xPack release suffix (GCC version + xPack revision)
+XPACK_RELEASE="${XPACK_RELEASE:-15.2.0-2}"
 XPACK_HOST="${XPACK_HOST:-darwin-x64}"
 XPACK_SHA256="${XPACK_SHA256:-f82340a331b932bdb285ddd2d7861a1d5405c80ebf09dd3308aca60637ad418c}"
 XPACK_TAG="${XPACK_TAG:-v${XPACK_RELEASE}}"
@@ -76,254 +22,599 @@ XPACK_URL="https://github.com/xpack-dev-tools/mingw-w64-gcc-xpack/releases/downl
 XPACK_CACHE="${XPACK_CACHE:-/tmp/${XPACK_ARCHIVE}}"
 XPACK_ROOT="${XPACK_ROOT:-/tmp/xpack-mingw-w64-gcc-${XPACK_RELEASE}}"
 
-echo "==> Ensuring xPack mingw-w64 GCC ${MINGW_GCC_VERSION} (PE cross-compiler)"
-[ -f "${XPACK_CACHE}" ] || curl -fL "${XPACK_URL}" -o "${XPACK_CACHE}"
-echo "${XPACK_SHA256}  ${XPACK_CACHE}" | shasum -a 256 -c - >/dev/null \
-  || { echo "ERROR: xPack toolchain SHA-256 mismatch for ${XPACK_CACHE}"; exit 1; }
-if [ ! -x "${XPACK_ROOT}/bin/x86_64-w64-mingw32-gcc" ]; then
-  rm -rf "${XPACK_ROOT}"; mkdir -p "${XPACK_ROOT}"
-  # The tarball has a single top-level xpack-mingw-w64-gcc-*/ dir; --strip-components=1 drops it so
-  # bin/ lands directly at ${XPACK_ROOT}/bin (deterministic - no find/mv that could double-nest).
+LAUNCHER_PROCESSES="steam.exe steamwebhelper.exe EpicGamesLauncher.exe EpicWebHelper.exe upc.exe UplayWebCore.exe"
+CEF_PROCESSES="steamwebhelper.exe upc.exe UplayWebCore.exe"
+CEF_FLAGS="--use-gl=swiftshader --use-angle=swiftshader --in-process-gpu --no-sandbox --disable-gpu --disable-gpu-compositing"
+
+WORK="$(mktemp -d /tmp/gm-wine-build.XXXXXX)"
+STAGE="${WORK}/stage/wswine.bundle"
+SRC="${WORK}/sources/wine"
+BUILD="${WORK}/build"
+TARBALL="${TARBALL_CACHE:-/tmp/crossover-sources-${CX_VERSION}.tar.gz}"
+
+BREW="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /usr/local)}"
+export MACOSX_DEPLOYMENT_TARGET
+export PATH="${BREW}/opt/bison/bin:${BREW}/opt/flex/bin:${BREW}/bin:${PATH}"
+
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "${KEEP_WORK}" = "1" ] && [ "${status}" -ne 0 ]; then
+    echo "==> Build failed; work directory kept at ${WORK}" >&2
+  else
+    rm -rf "${WORK}"
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+download_cached() {
+  url=$1
+  destination=$2
+
+  [ -f "${destination}" ] && return 0
+
+  mkdir -p "$(dirname "${destination}")"
+  temporary="${destination}.part.$$"
+  rm -f "${temporary}"
+  if ! curl -fL --retry 3 --retry-delay 2 "${url}" -o "${temporary}"; then
+    rm -f "${temporary}"
+    fail "download failed: ${url}"
+  fi
+  mv "${temporary}" "${destination}"
+}
+
+verify_sha256() {
+  expected=$1
+  file=$2
+  label=$3
+
+  echo "${expected}  ${file}" | shasum -a 256 -c - >/dev/null \
+    || fail "${label} SHA-256 mismatch: ${file}"
+}
+
+insert_before_literal() {
+  target=$1
+  marker=$2
+  block=$3
+
+  GM_MARKER="${marker}" GM_BLOCK="${block}" perl -0777 -i -pe '
+    BEGIN {
+      open my $fh, "<", $ENV{GM_BLOCK} or die "$ENV{GM_BLOCK}: $!";
+      our $block = do { local $/; <$fh> };
+      our $marker = $ENV{GM_MARKER};
+      our $matches = 0;
+    }
+    $matches += s{\Q$marker\E}{$block$marker};
+    END { die "patch marker not found exactly once: $marker\n" unless $matches == 1; }
+  ' "${target}"
+}
+
+insert_after_regex() {
+  target=$1
+  pattern=$2
+  block=$3
+
+  GM_PATTERN="${pattern}" GM_BLOCK="${block}" perl -0777 -i -pe '
+    BEGIN {
+      open my $fh, "<", $ENV{GM_BLOCK} or die "$ENV{GM_BLOCK}: $!";
+      our $block = do { local $/; <$fh> };
+      our $pattern = $ENV{GM_PATTERN};
+      our $matches = 0;
+    }
+    $matches += s{($pattern)}{$1$block};
+    END { die "patch pattern not found exactly once: $pattern\n" unless $matches == 1; }
+  ' "${target}"
+}
+
+write_char_entries() {
+  for value in $1; do
+    printf '            "%s",\n' "${value}"
+  done
+}
+
+write_wchar_entries() {
+  for value in $1; do
+    printf '            L"%s",\n' "${value}"
+  done
+}
+
+mkdir -p "${OUT_DIR}"
+
+echo "==> Building Wine from CrossOver ${CX_VERSION} (tag ${BUILD_TAG})"
+echo "    work: ${WORK}"
+echo "    brew: ${BREW}"
+
+echo "==> Ensuring xPack mingw-w64 GCC ${MINGW_GCC_VERSION}"
+download_cached "${XPACK_URL}" "${XPACK_CACHE}"
+verify_sha256 "${XPACK_SHA256}" "${XPACK_CACHE}" "xPack toolchain"
+
+if [ ! -x "${XPACK_ROOT}/bin/x86_64-w64-mingw32-gcc" ] || \
+   [ ! -x "${XPACK_ROOT}/bin/i686-w64-mingw32-gcc" ]; then
+  rm -rf "${XPACK_ROOT}"
+  mkdir -p "${XPACK_ROOT}"
   tar -xzf "${XPACK_CACHE}" -C "${XPACK_ROOT}" --strip-components=1
 fi
+
 xattr -dr com.apple.quarantine "${XPACK_ROOT}" 2>/dev/null || true
 export PATH="${XPACK_ROOT}/bin:${PATH}"
 
-# Hard pin: both PE target compilers must be EXACTLY ${MINGW_GCC_VERSION}. Fail loudly so a wandering
-# Homebrew/PATH mingw-w64 can never silently swap the toolchain out from under the build.
 for cc in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
-  v="$("${cc}" -dumpfullversion 2>/dev/null || echo missing)"
-  [ "${v}" = "${MINGW_GCC_VERSION}" ] || { echo "ERROR: ${cc} reports '${v}', need exactly ${MINGW_GCC_VERSION}"; exit 1; }
+  version="$("${cc}" -dumpfullversion 2>/dev/null || echo missing)"
+  [ "${version}" = "${MINGW_GCC_VERSION}" ] \
+    || fail "${cc} reports '${version}', expected '${MINGW_GCC_VERSION}'"
 done
-echo "    cross GCC: $(x86_64-w64-mingw32-gcc -dumpfullversion) (i686 + x86_64, xPack)"
 
-echo "==> Downloading source (cache: ${TARBALL})"
-[ -f "${TARBALL}" ] || curl -fL "${SOURCE_URL}" -o "${TARBALL}"
+echo "    cross GCC: $(x86_64-w64-mingw32-gcc -dumpfullversion)"
 
-# The CrossOver bundle is one tarball whose top level is sources/ with many sibling projects
-# (wine, ghostscript, dxvk, gstreamer, ...). We only want sources/wine; extract just that so the
-# build can't wander into a sibling project's configure.
+echo "==> Downloading CrossOver source"
+download_cached "${SOURCE_URL}" "${TARBALL}"
+if [ -n "${SOURCE_SHA256}" ]; then
+  verify_sha256 "${SOURCE_SHA256}" "${TARBALL}" "CrossOver source"
+fi
+
 echo "==> Extracting sources/wine"
 tar -xzf "${TARBALL}" -C "${WORK}" sources/wine
-[ -x "${SRC}/configure" ] || { echo "ERROR: wine configure not found at ${SRC}"; exit 1; }
+[ -x "${SRC}/configure" ] || fail "Wine configure script not found at ${SRC}"
 
-# CrossOver's winedbg includes programs/winedbg/distversion.h, which their top-level build
-# generates (it carries the crash-dialog strings). We build only sources/wine, so the file is
-# missing and config.status' makedep step fails. Provide a minimal one before configure runs.
 cat > "${SRC}/programs/winedbg/distversion.h" <<'EOF'
 #define WINDEBUG_WHAT_HAPPENED_MESSAGE "The program encountered a problem and stopped working."
 #define WINDEBUG_USER_SUGGESTION_MESSAGE "Please relaunch the application. If the problem persists, reinstall it."
 EOF
 
-# Restore CrossOver's WINEDLLPATH_PREPEND, which CrossOver 26 dropped from the loader. GameMachine's
-# D3DMetal (GPTK) backend relies on it: the GPTK PE DLLs carry the "Wine builtin DLL" signature, so
-# Wine won't load them from the prefix as native - they must shadow the engine's own builtin
-# d3d11/dxgi/... by being searched FIRST on the builtin DLL path. CX26/upstream only APPEND
-# WINEDLLPATH after the default dll_dir (set_dll_path: dll_dir is pushed before the WINEDLLPATH
-# entries), so a plain WINEDLLPATH never wins. The prepend_dll_path() helper (CW Hack 24067) still
-# exists in the source - we only re-wire the env-var caller into set_dll_path(). Without this the
-# engine's builtin DXMT always wins and D3DMetal silently never loads. Idempotent (skip if present).
+
+# App-specific helpers may keep normal windows while remaining outside the macOS Dock.
+MACDRV_MAIN="${SRC}/dlls/winemac.drv/macdrv_main.c"
+MACDRV_COCOA="${SRC}/dlls/winemac.drv/macdrv_cocoa.h"
+COCOA_APP="${SRC}/dlls/winemac.drv/cocoa_app.m"
+if ! grep -q '"HideDockIcon"' "${MACDRV_MAIN}"; then
+  echo "==> Patching winemac.drv: app-specific Dock visibility"
+  python3 - "${MACDRV_MAIN}" "${MACDRV_COCOA}" "${COCOA_APP}" <<'PYDOCK'
+from pathlib import Path
+import sys
+
+main_path, cocoa_path, app_path = map(Path, sys.argv[1:])
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+main = main_path.read_text(encoding="utf-8")
+cocoa = cocoa_path.read_text(encoding="utf-8")
+app = app_path.read_text(encoding="utf-8")
+
+main = replace_once(
+    main,
+    "bool enable_app_nap = false;\n",
+    "bool enable_app_nap = false;\nbool hide_dock_icon = false;\n",
+    "macdrv global",
+)
+main = replace_once(
+    main,
+    '''    if (!get_config_key(hkey, appkey, "EnableAppNap", buffer, sizeof(buffer)))
+        enable_app_nap = IS_OPTION_TRUE(buffer[0]);
+''',
+    '''    if (!get_config_key(hkey, appkey, "EnableAppNap", buffer, sizeof(buffer)))
+        enable_app_nap = IS_OPTION_TRUE(buffer[0]);
+
+    if (!get_config_key(hkey, appkey, "HideDockIcon", buffer, sizeof(buffer)))
+        hide_dock_icon = IS_OPTION_TRUE(buffer[0]);
+''',
+    "macdrv registry option",
+)
+cocoa = replace_once(
+    cocoa,
+    "extern bool enable_app_nap;\n",
+    "extern bool enable_app_nap;\nextern bool hide_dock_icon;\n",
+    "macdrv declaration",
+)
+app = replace_once(
+    app,
+    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
+        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+''',
+    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
+        if (hide_dock_icon)
+        {
+            if ([NSApp activationPolicy] != NSApplicationActivationPolicyAccessory)
+                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+            if (activateIfTransformed)
+                [self tryToActivateIgnoringOtherApps:YES];
+            return;
+        }
+
+        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+''',
+    "Cocoa activation policy",
+)
+
+main_path.write_text(main, encoding="utf-8")
+cocoa_path.write_text(cocoa, encoding="utf-8")
+app_path.write_text(app, encoding="utf-8")
+PYDOCK
+fi
+
+# GameMachine: set per-executable macOS application names before Dock registration.
+MACDRV_MAIN="${SRC}/dlls/winemac.drv/macdrv_main.c"
+MACDRV_COCOA="${SRC}/dlls/winemac.drv/macdrv_cocoa.h"
+COCOA_APP="${SRC}/dlls/winemac.drv/cocoa_app.m"
+if ! grep -q 'GameMachine: set per-executable macOS application names' "${MACDRV_MAIN}"; then
+  echo "==> Patching winemac.drv: per-executable application names"
+  python3 - "${MACDRV_MAIN}" "${MACDRV_COCOA}" "${COCOA_APP}" <<'PYNAME'
+from pathlib import Path
+import sys
+
+main_path, cocoa_path, app_path = map(Path, sys.argv[1:])
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+main = main_path.read_text(encoding="utf-8")
+cocoa = cocoa_path.read_text(encoding="utf-8")
+app = app_path.read_text(encoding="utf-8")
+
+main = replace_once(
+    main,
+    "bool hide_dock_icon = false;\n",
+    "bool hide_dock_icon = false;\nchar *application_display_name;\n",
+    "application name global",
+)
+main = replace_once(
+    main,
+    '''    len = lstrlenW(appname);
+
+    if (len && len < MAX_PATH)
+''',
+    '''    len = lstrlenW(appname);
+
+    /* GameMachine: set per-executable macOS application names from the launch environment. */
+    for (unsigned int i = 0; i < 8; i++)
+    {
+        char executable_key[64], name_key[64];
+        const char *configured_executable, *configured_name;
+        WCHAR configured_executableW[MAX_PATH];
+        size_t configured_length;
+
+        snprintf(executable_key, sizeof(executable_key), "GAMEMACHINE_DOCK_EXECUTABLE_%u", i);
+        snprintf(name_key, sizeof(name_key), "GAMEMACHINE_DOCK_NAME_%u", i);
+        configured_executable = getenv(executable_key);
+        configured_name = getenv(name_key);
+        if (!configured_executable || !*configured_executable || !configured_name || !*configured_name) continue;
+
+        configured_length = strlen(configured_executable);
+        if (configured_length >= ARRAY_SIZE(configured_executableW)) continue;
+        asciiz_to_unicode(configured_executableW, configured_executable);
+
+        if (!wcsicmp(appname, configured_executableW))
+        {
+            application_display_name = strdup(configured_name);
+            break;
+        }
+    }
+
+    if (len && len < MAX_PATH)
+''',
+    "application name selection",
+)
+cocoa = replace_once(
+    cocoa,
+    "extern bool hide_dock_icon;\n",
+    "extern bool hide_dock_icon;\nextern char *application_display_name;\n",
+    "application name declaration",
+)
+app = replace_once(
+    app,
+    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
+        if (hide_dock_icon)
+''',
+    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
+        if (application_display_name)
+        {
+            NSString *name = [NSString stringWithUTF8String:application_display_name];
+            if ([name length]) [[NSProcessInfo processInfo] setProcessName:name];
+        }
+
+        if (hide_dock_icon)
+''',
+    "process name assignment",
+)
+app = replace_once(
+    app,
+    '''            bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+''',
+    '''            bundleName = application_display_name ? [[NSProcessInfo processInfo] processName] :
+                         [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+''',
+    "application menu name",
+)
+
+main_path.write_text(main, encoding="utf-8")
+cocoa_path.write_text(cocoa, encoding="utf-8")
+app_path.write_text(app, encoding="utf-8")
+PYNAME
+fi
+
 LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
-  echo "==> Patching loader.c: restore WINEDLLPATH_PREPEND (GPTK D3DMetal DLL shadowing)"
+  echo "==> Restoring WINEDLLPATH_PREPEND"
   cat > "${WORK}/gm-prepend.c" <<'CEOF'
 
-    /* GameMachine: re-add CrossOver's WINEDLLPATH_PREPEND (dropped in CX26) so an external dir
-       (the GPTK D3DMetal DLLs) can shadow the engine's builtin DLLs by name. Entries are prepended
-       in reverse so the first listed dir ends up searched first, ahead of dll_dir.
-       OWNERSHIP: prepend_dll_path() stores the pointer it is given WITHOUT copying it (it does
-       `dll_paths[0] = path;`), and dll_paths lives for the whole process. So each entry MUST be a
-       persistent allocation - we strdup() it. The earlier version passed pointers INTO a strtok'd
-       buffer that was then free()'d, leaving dll_paths[0..n] dangling into freed memory that
-       set_system_dll_path()/set_home_dir()/set_config_dir() (called right after in init_paths)
-       promptly reused - so the GPTK path was silently clobbered and D3DMetal fell back to the
-       engine's builtin DXMT. The strdup'd copies are intentionally never freed (matches how
-       set_dll_path() strdup's its own WINEDLLPATH entries). */
+    /* Allow an external builtin DLL directory to shadow the engine DLL directory. */
     if ((path = getenv( "WINEDLLPATH_PREPEND" )) && *path)
     {
         char *gm_path, **gm_entries;
-        int gm_n = 0, gm_cap = 1;
-        for (p = path; *p; p++) if (*p == ':') gm_cap++;
-        gm_entries = malloc( gm_cap * sizeof(*gm_entries) );
-        gm_path = strdup( path );
-        for (p = strtok( gm_path, ":" ); p; p = strtok( NULL, ":" )) gm_entries[gm_n++] = p;
-        while (gm_n > 0) prepend_dll_path( strdup( gm_entries[--gm_n] ) );
+        int gm_count = 0, gm_capacity = 1;
+
+        for (p = path; *p; p++) if (*p == ':') gm_capacity++;
+        if (!(gm_entries = malloc( gm_capacity * sizeof(*gm_entries) ))) abort();
+        if (!(gm_path = strdup( path ))) abort();
+
+        for (p = strtok( gm_path, ":" ); p; p = strtok( NULL, ":" ))
+            gm_entries[gm_count++] = p;
+
+        while (gm_count > 0)
+        {
+            char *gm_entry = strdup( gm_entries[--gm_count] );
+            if (!gm_entry) abort();
+            prepend_dll_path( gm_entry );
+        }
+
         free( gm_entries );
         free( gm_path );
     }
 CEOF
   sed -i.bak '/^    dll_paths\[count\] = NULL;$/r '"${WORK}/gm-prepend.c" "${LOADER}"
   rm -f "${LOADER}.bak"
-  grep -q 'WINEDLLPATH_PREPEND' "${LOADER}" || { echo "ERROR: WINEDLLPATH_PREPEND patch did not apply"; exit 1; }
+  grep -q 'WINEDLLPATH_PREPEND' "${LOADER}" \
+    || fail "WINEDLLPATH_PREPEND patch did not apply"
 fi
 
-# GameMachine: CEF (Chromium Embedded Framework) launchers render broken under winemac with their default
-# ANGLE GL backend - Steam's webhelper (steamwebhelper.exe) shows a BLACK frame, and Ubisoft Connect
-# (browser host upc.exe + its UplayWebCore.exe gpu/renderer subprocesses) shows a TRANSPARENT/INVISIBLE
-# window (the CEF render/gpu process crashes; cf. Whisky #502). Verified for Steam via macdrv/bitblt trace
-# that the present path is fine (both ANGLE and SwiftShader present identically through NtGdiStretchBlt) -
-# ANGLE just produces no usable frame; the documented CEF-under-Wine fix is to force the software
-# SwiftShader GL backend + disable GPU compositing. Applied on every CEF launch (the browser process AND
-# its gpu/renderer children, which also go through CreateProcess). Relocates the former per-prefix
-# steamwebhelper.exe wrapper into the engine: no binary swap, automatic for all prefixes. Placed in
-# CreateProcessInternalW right after CrossOver's own app-specific hacks (Epic/powershell), modifying
-# tidy_cmdline (the cmdline actually used downstream; freed at function end). Idempotent (skip if present).
-PROC="${SRC}/dlls/kernelbase/process.c"
-if ! grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}"; then
-  echo "==> Patching process.c: force SwiftShader GL on CEF launchers (Steam black-UI + Ubisoft invisible-window fix)"
-  cat > "${WORK}/gm-steam-cef.c" <<'CEOF'
-    /* GameMachine HACK: CEF launchers render broken under winemac with their default ANGLE GL backend -
-       Steam's webhelper (steamwebhelper.exe) shows a BLACK frame (verified via macdrv/bitblt trace: the
-       present path is fine, both ANGLE and SwiftShader present identically through NtGdiStretchBlt -
-       ANGLE just produces no usable frame), and Ubisoft Connect (browser host upc.exe + its
-       UplayWebCore.exe gpu/renderer subprocesses) shows a TRANSPARENT/INVISIBLE window because the CEF
-       render/gpu process crashes (cf. Whisky #502). The documented CEF-under-Wine fix is to force the
-       software SwiftShader GL backend + disable GPU compositing. Applied on every CEF process launch
-       (the browser process AND its gpu/renderer children, which also pass through CreateProcess), unless
-       already set. Same flags the standalone prefix wrapper used, relocated into the engine so no
-       per-prefix binary swap is needed. Idempotency marker: --use-gl=swiftshader (Chromium propagates
-       it to children, so we don't double-append). */
-    if (tidy_cmdline
-        && (wcsstr( tidy_cmdline, L"steamwebhelper.exe" )   /* Steam CEF webhelper (browser + children) */
-            || wcsstr( tidy_cmdline, L"UplayWebCore.exe" )  /* Ubisoft Connect CEF gpu/renderer subprocess */
-            || wcsstr( tidy_cmdline, L"upc.exe" ))          /* Ubisoft Connect CEF browser host */
-        && !wcsstr( tidy_cmdline, L"--use-gl=swiftshader" ))
+EPIC_OPENGL_MARKER='GameMachine: force Epic Games Launcher to use OpenGL'
+if ! grep -q "${EPIC_OPENGL_MARKER}" "${LOADER}"; then
+  echo "==> Forcing Epic Games Launcher to use its OpenGL renderer"
+  cat > "${WORK}/gm-epic-opengl.c" <<'CEOF'
+    /* GameMachine: force Epic Games Launcher to use OpenGL under winemac.
+       This runs in __wine_main before Wine stores argc/argv, so it covers the initial `wine EXE`
+       invocation as well as launcher self-restarts and updater-spawned Wine processes. The argv
+       allocation intentionally lives for the process lifetime because main_argv retains it. */
     {
-        static const WCHAR gm_cef_flags[] = L" --use-gl=swiftshader --in-process-gpu --no-sandbox --disable-gpu --disable-gpu-compositing";
-        DWORD gm_cef_head = lstrlenW( tidy_cmdline );
-        DWORD gm_cef_len = gm_cef_head + ARRAY_SIZE( gm_cef_flags );
-        WCHAR *gm_cef_cmd = RtlAllocateHeap( GetProcessHeap(), 0, gm_cef_len * sizeof(WCHAR) );
-        if (gm_cef_cmd)
+        int gm_arg;
+        int gm_epic = 0;
+        int gm_has_opengl = 0;
+
+        for (gm_arg = 1; gm_arg < argc; gm_arg++)
         {
-            lstrcpyW( gm_cef_cmd, tidy_cmdline );
-            lstrcpyW( gm_cef_cmd + gm_cef_head, gm_cef_flags );
-            if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
-            tidy_cmdline = gm_cef_cmd;
-            FIXME( "GameMachine HACK: forcing --use-gl=swiftshader on CEF launcher (Steam/Ubisoft)\n" );
+            if (!argv[gm_arg]) continue;
+            if (strstr( argv[gm_arg], "EpicGamesLauncher.exe" )) gm_epic = 1;
+            if (!strcmp( argv[gm_arg], "-opengl" )) gm_has_opengl = 1;
+        }
+
+        if (gm_epic && !gm_has_opengl)
+        {
+            char **gm_argv = malloc( (argc + 2) * sizeof(*gm_argv) );
+            if (!gm_argv) abort();
+
+            memcpy( gm_argv, argv, argc * sizeof(*gm_argv) );
+            gm_argv[argc] = strdup( "-opengl" );
+            if (!gm_argv[argc]) abort();
+            gm_argv[argc + 1] = NULL;
+
+            argv = gm_argv;
+            argc++;
         }
     }
 
 CEOF
-  GM_BLOCK="${WORK}/gm-steam-cef.c" perl -0777 -i -pe '
-    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
-    s{(\Q    /* Warn if unsupported features are used */\E)}{$b$1};
-  ' "${PROC}"
-  grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}" || { echo "ERROR: Steam CEF patch did not apply"; exit 1; }
+  insert_before_literal "${LOADER}" '    main_argc = argc;' "${WORK}/gm-epic-opengl.c"
+  grep -q "${EPIC_OPENGL_MARKER}" "${LOADER}" \
+    || fail "Epic Games Launcher OpenGL patch did not apply"
 fi
 
-# GameMachine: Route the Metal HUD per Windows process.
-#
-# A launcher process must not show Apple's Metal Performance HUD, but a game started by that launcher
-# still needs the user's original HUD setting. Merely calling unsetenv("MTL_HUD_ENABLED") in loader.c
-# is not enough: Wine creates Windows children by fork()+exec(), and the new Unix loader inherits the
-# launcher's CURRENT native environment. Therefore the old patch also disabled the HUD in every game
-# started by Epic/Ubisoft/Steam.
-#
-# The fix has two parts:
-#   1. loader.c saves the original setting in GM_MTL_HUD_ENABLED, then removes MTL_HUD_ENABLED only
-#      from known launcher/UI processes.
-#   2. process.c restores the saved setting in the forked child before exec_wineloader(), except when
-#      that child is itself another launcher/UI helper.
-#
-# This keeps launcher windows clean while launcher-started games get the HUD again.
-LOADER_UNIX="${SRC}/dlls/ntdll/unix/loader.c"
-if ! grep -q 'GameMachine HACK: preserve Metal HUD setting for launcher children' "${LOADER_UNIX}"; then
-  echo "==> Patching loader.c: hide Metal HUD on launcher processes and preserve the setting"
-  cat > "${WORK}/gm-hud-disable.c" <<'CEOF'
-
-    /* GameMachine HACK: preserve Metal HUD setting for launcher children, then hide it here. */
+KERNELBASE_PROCESS="${SRC}/dlls/kernelbase/process.c"
+CEF_MARKER='GameMachine: software rendering for Steam and Ubisoft embedded browser processes'
+if ! grep -q "${CEF_MARKER}" "${KERNELBASE_PROCESS}"; then
+  echo "==> Enabling software rendering for Steam and Ubisoft browser processes"
+  {
+    cat <<'CEOF'
+    /* GameMachine: software rendering for Steam and Ubisoft embedded browser processes.
+       Epic Games Launcher must not receive these Chromium flags; it uses its own -opengl path. */
+    if (tidy_cmdline)
     {
+        static const WCHAR *const gm_cef_processes[] =
+        {
+CEOF
+    write_wchar_entries "${CEF_PROCESSES}"
+    cat <<'CEOF'
+        };
+        static const WCHAR *const gm_cef_flags[] =
+        {
+CEOF
+    write_wchar_entries "${CEF_FLAGS}"
+    cat <<'CEOF'
+        };
+        BOOL gm_cef_process = FALSE;
+        SIZE_T gm_chars;
+        unsigned int gm_index;
+
+        for (gm_index = 0; gm_index < ARRAY_SIZE( gm_cef_processes ); gm_index++)
+        {
+            if (wcsstr( tidy_cmdline, gm_cef_processes[gm_index] ))
+            {
+                gm_cef_process = TRUE;
+                break;
+            }
+        }
+
+        if (gm_cef_process)
+        {
+            DWORD gm_head = lstrlenW( tidy_cmdline );
+            WCHAR *gm_cmdline, *gm_tail;
+
+            gm_chars = gm_head + 1;
+            for (gm_index = 0; gm_index < ARRAY_SIZE( gm_cef_flags ); gm_index++)
+            {
+                if (!wcsstr( tidy_cmdline, gm_cef_flags[gm_index] ))
+                    gm_chars += 1 + lstrlenW( gm_cef_flags[gm_index] );
+            }
+
+            if (gm_chars > gm_head + 1 &&
+                (gm_cmdline = RtlAllocateHeap( GetProcessHeap(), 0,
+                                               gm_chars * sizeof(*gm_cmdline) )))
+            {
+                lstrcpyW( gm_cmdline, tidy_cmdline );
+                gm_tail = gm_cmdline + gm_head;
+
+                for (gm_index = 0; gm_index < ARRAY_SIZE( gm_cef_flags ); gm_index++)
+                {
+                    if (!wcsstr( tidy_cmdline, gm_cef_flags[gm_index] ))
+                    {
+                        *gm_tail++ = ' ';
+                        lstrcpyW( gm_tail, gm_cef_flags[gm_index] );
+                        gm_tail += lstrlenW( gm_cef_flags[gm_index] );
+                    }
+                }
+
+                if (tidy_cmdline != cmd_line)
+                    RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
+                tidy_cmdline = gm_cmdline;
+                FIXME( "GameMachine: enabled software rendering for an embedded browser process\n" );
+            }
+        }
+    }
+
+CEOF
+  } > "${WORK}/gm-cef.c"
+  insert_before_literal "${KERNELBASE_PROCESS}" '    /* Warn if unsupported features are used */' "${WORK}/gm-cef.c"
+  grep -q "${CEF_MARKER}" "${KERNELBASE_PROCESS}" \
+    || fail "embedded browser rendering patch did not apply"
+fi
+
+LOADER_HUD_MARKER='GameMachine: route the Metal HUD for launcher processes'
+if ! grep -q "${LOADER_HUD_MARKER}" "${LOADER}"; then
+  echo "==> Routing the Metal HUD for launcher processes"
+  {
+    cat <<'CEOF'
+
+    /* GameMachine: route the Metal HUD for launcher processes. */
+    {
+        static const char *const gm_launchers[] =
+        {
+CEOF
+    write_char_entries "${LAUNCHER_PROCESSES}"
+    cat <<'CEOF'
+        };
         extern int *_NSGetArgc(void);
         extern char ***_NSGetArgv(void);
         int gm_argc = *_NSGetArgc();
         char **gm_argv = *_NSGetArgv();
-        int gm_i;
-        for (gm_i = 0; gm_i < gm_argc; gm_i++) {
-            if (gm_argv[gm_i] && (strstr(gm_argv[gm_i], "steam.exe") || strstr(gm_argv[gm_i], "steamwebhelper.exe") ||
-                                  strstr(gm_argv[gm_i], "EpicGamesLauncher.exe") || strstr(gm_argv[gm_i], "EpicWebHelper.exe") ||
-                                  strstr(gm_argv[gm_i], "upc.exe") || strstr(gm_argv[gm_i], "UplayWebCore.exe")))
+        int gm_launcher = 0;
+        int gm_arg;
+        unsigned int gm_index;
+
+        for (gm_arg = 0; gm_arg < gm_argc && !gm_launcher; gm_arg++)
+        {
+            if (!gm_argv[gm_arg]) continue;
+            for (gm_index = 0; gm_index < ARRAY_SIZE( gm_launchers ); gm_index++)
             {
-                const char *gm_hud = getenv("MTL_HUD_ENABLED");
-                if (gm_hud && !getenv("GM_MTL_HUD_ENABLED"))
-                    setenv("GM_MTL_HUD_ENABLED", gm_hud, 1);
-                unsetenv("MTL_HUD_ENABLED");
-                break;
+                if (strstr( gm_argv[gm_arg], gm_launchers[gm_index] ))
+                {
+                    gm_launcher = 1;
+                    break;
+                }
             }
+        }
+
+        if (gm_launcher)
+        {
+            const char *gm_hud = getenv( "MTL_HUD_ENABLED" );
+            if (gm_hud && !getenv( "GM_MTL_HUD_ENABLED" ))
+                setenv( "GM_MTL_HUD_ENABLED", gm_hud, 1 );
+            unsetenv( "MTL_HUD_ENABLED" );
         }
     }
 CEOF
-  GM_BLOCK="${WORK}/gm-hud-disable.c" perl -0777 -i -pe '
-    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
-    s/(start_main_thread\s*\(\)\s*;)/$b\n    $1/g;
-  ' "${LOADER_UNIX}"
-  grep -q 'GameMachine HACK: preserve Metal HUD setting for launcher children' "${LOADER_UNIX}" \
-    || { echo "ERROR: launcher Metal HUD patch did not apply"; exit 1; }
+  } > "${WORK}/gm-hud-loader.c"
+  insert_before_literal "${LOADER}" '    start_main_thread();' "${WORK}/gm-hud-loader.c"
+  grep -q "${LOADER_HUD_MARKER}" "${LOADER}" \
+    || fail "launcher Metal HUD patch did not apply"
 fi
 
-PROC_UNIX="${SRC}/dlls/ntdll/unix/process.c"
-if ! grep -q 'GameMachine HACK: restore Metal HUD for launcher-spawned games' "${PROC_UNIX}"; then
-  echo "==> Patching process.c: restore Metal HUD for games started by launchers"
-  cat > "${WORK}/gm-hud-child.c" <<'CEOF'
+NTDLL_PROCESS="${SRC}/dlls/ntdll/unix/process.c"
+HUD_CHILD_MARKER='GameMachine: restore the Metal HUD for launcher-spawned games'
+if ! grep -q "${HUD_CHILD_MARKER}" "${NTDLL_PROCESS}"; then
+  echo "==> Restoring the Metal HUD for launcher-spawned games"
+  {
+    cat <<'CEOF'
 
 #ifdef __APPLE__
-            /* GameMachine HACK: restore Metal HUD for launcher-spawned games.
-               spawn_process() forks from the current Wine process, so a launcher's unset native
-               MTL_HUD_ENABLED would otherwise propagate to every child. Route the saved value by
-               the child image name before exec_wineloader(). */
+            /* GameMachine: restore the Metal HUD for launcher-spawned games. */
             {
-                const char *gm_saved_hud = getenv("GM_MTL_HUD_ENABLED");
+                static const char *const gm_launchers[] =
+                {
+CEOF
+    write_char_entries "${LAUNCHER_PROCESSES}"
+    cat <<'CEOF'
+                };
+                const char *gm_saved_hud = getenv( "GM_MTL_HUD_ENABLED" );
                 char gm_image[2048];
-                int gm_len = 0;
-                BOOL gm_launcher = FALSE;
+                int gm_launcher = 0;
+                int gm_length = 0;
+                unsigned int gm_index;
 
                 if (params->ImagePathName.Buffer)
                 {
-                    gm_len = ntdll_wcstoumbs( params->ImagePathName.Buffer,
-                                             params->ImagePathName.Length / sizeof(WCHAR),
-                                             gm_image, sizeof(gm_image) - 1, FALSE );
-                    if (gm_len > 0)
+                    gm_length = ntdll_wcstoumbs( params->ImagePathName.Buffer,
+                                                 params->ImagePathName.Length / sizeof(WCHAR),
+                                                 gm_image, sizeof(gm_image) - 1, FALSE );
+                    if (gm_length > 0)
                     {
-                        gm_image[gm_len] = 0;
-                        gm_launcher =
-                            strstr(gm_image, "steam.exe") ||
-                            strstr(gm_image, "steamwebhelper.exe") ||
-                            strstr(gm_image, "EpicGamesLauncher.exe") ||
-                            strstr(gm_image, "EpicWebHelper.exe") ||
-                            strstr(gm_image, "upc.exe") ||
-                            strstr(gm_image, "UplayWebCore.exe");
+                        gm_image[gm_length] = 0;
+                        for (gm_index = 0; gm_index < ARRAY_SIZE( gm_launchers ); gm_index++)
+                        {
+                            if (strstr( gm_image, gm_launchers[gm_index] ))
+                            {
+                                gm_launcher = 1;
+                                break;
+                            }
+                        }
                     }
                 }
 
                 if (gm_launcher)
-                    unsetenv("MTL_HUD_ENABLED");
+                    unsetenv( "MTL_HUD_ENABLED" );
                 else if (gm_saved_hud)
-                    setenv("MTL_HUD_ENABLED", gm_saved_hud, 1);
+                    setenv( "MTL_HUD_ENABLED", gm_saved_hud, 1 );
             }
 #endif
 CEOF
-  GM_BLOCK="${WORK}/gm-hud-child.c" perl -0777 -i -pe '
-    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
-    s{(\n\s*if \(winedebug\) putenv\( winedebug \);)}{$1$b};
-  ' "${PROC_UNIX}"
-  grep -q 'GameMachine HACK: restore Metal HUD for launcher-spawned games' "${PROC_UNIX}" \
-    || { echo "ERROR: child Metal HUD routing patch did not apply"; exit 1; }
+  } > "${WORK}/gm-hud-child.c"
+  insert_after_regex "${NTDLL_PROCESS}" '\n\s*if \(winedebug\) putenv\( winedebug \);' "${WORK}/gm-hud-child.c"
+  grep -q "${HUD_CHILD_MARKER}" "${NTDLL_PROCESS}" \
+    || fail "child Metal HUD patch did not apply"
 fi
 
-# Keep winemac.drv symbols visible for DXMT. CrossOver already exports them; default visibility makes
-# sure a toolchain default of -fvisibility=hidden can't strip the Metal bridge.
 export CFLAGS="-g -O2 -fvisibility=default -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-incompatible-pointer-types"
 export CXXFLAGS="${CFLAGS}"
 export LDFLAGS="-Wl,-rpath,@loader_path/../../ -Wl,-rpath,${BREW}/lib"
-# PE cross-flags: force C17 on the PE side. GCC 15 defaults to C23 (-std=gnu23), where `bool` is a
-# reserved keyword, so Wine PE code that still uses `bool` as an identifier (e.g.
-# programs/winhlp32/macro.h: `BOOL bool;`) fails to compile. Pinning -std=gnu17 restores the GCC-13/14
-# default and keeps the PE side compiling on the newer toolchain. We omit -g (Wine's PE default does
-# too) and --strip-all after staging anyway. NOTE: setting CROSSCFLAGS replaces Wine's configure-chosen
-# default cross-flags; the earlier worry that this changes codegen and breaks OW2/eidolon is moot - the
-# eidolon fix is the CW HACK 22434 loader hook + CX_APPLEGPTK env, not PE codegen (see the GCC note above).
 export CROSSCFLAGS="-O2 -std=gnu17"
 
-echo "==> Configuring (new WoW64, i386 + x86_64)"
+echo "==> Configuring Wine"
 mkdir -p "${BUILD}"
 cd "${BUILD}"
 "${SRC}/configure" \
@@ -345,7 +636,7 @@ cd "${BUILD}"
   --without-alsa \
   --without-krb5
 
-echo "==> Building -j${JOBS}"
+echo "==> Building with ${JOBS} jobs"
 make -j"${JOBS}"
 make install
 
@@ -353,138 +644,118 @@ echo "==> Staging wswine.bundle"
 mkdir -p "${STAGE}"
 cp -R "${WORK}/stage-prefix/." "${STAGE}/"
 
-# Strip the PE modules to keep the artifact lean. We already compile the PE side without -g, so there
-# are no DWARF sections; --strip-all additionally drops the COFF symbol table (PE exports live in .edata
-# and are preserved), which shrinks the download. ONLY the PE .dll/.exe are stripped here - the Mach-O
-# unix .so/.dylib are left intact for the ad-hoc signing step below. NOTE: stripping is purely a size
-# optimization, NOT an anti-tamper fix - the eidolon/OW2 mitigation is the CW HACK 22434 loader hook +
-# CX_APPLEGPTK env, independent of the PE toolchain (see the GCC note above).
-echo "==> Stripping PE modules (lean artifact)"
+echo "==> Stripping PE modules"
 for arch_win in i386-windows x86_64-windows; do
   win_dir="${STAGE}/lib/wine/${arch_win}"
   [ -d "${win_dir}" ] || continue
+
   case "${arch_win}" in
-    i386-windows)   pe_strip="i686-w64-mingw32-strip" ;;
+    i386-windows) pe_strip="i686-w64-mingw32-strip" ;;
     x86_64-windows) pe_strip="x86_64-w64-mingw32-strip" ;;
   esac
-  find "${win_dir}" -type f \( -name '*.dll' -o -name '*.exe' \) -print0 2>/dev/null \
-    | while IFS= read -r -d '' f; do "${pe_strip}" --strip-all "$f" 2>/dev/null || true; done
+
+  find "${win_dir}" -type f \( -name '*.dll' -o -name '*.exe' \) -print 2>/dev/null \
+    | while IFS= read -r file_path; do
+        "${pe_strip}" --strip-all "${file_path}" 2>/dev/null || true
+      done
 done
 
-# Sanity check that DXMT will find what it needs.
 winemac="$(find "${STAGE}/lib/wine" \( -name 'winemac.drv.so' -o -name 'winemac.so' \) -print -quit 2>/dev/null)"
 if [ -n "${winemac}" ] && nm -gU "${winemac}" 2>/dev/null | grep -qi 'macdrv'; then
-  echo "==> winemac exports macdrv_* (DXMT can bind)"
+  echo "==> winemac exports macdrv_*"
 else
-  echo "ERROR: macdrv_* symbols not found in winemac driver; DXMT cannot bind"
-  exit 1
+  fail "macdrv_* symbols are not exported by winemac"
 fi
 
-# Bundle the shared wine-mono (.NET) and wine-gecko (MSHTML) runtimes so a fresh prefix doesn't
-# pop the "Wine could not find a wine-mono/gecko package" download dialog on first launch. These
-# are NOT part of the Wine source tree (they are separate prebuilt packages), so a from-source
-# build omits them unless we add them here, exactly like the Gcenx/CrossOver macOS packages do.
-# The versions are read from the very source we compile (dlls/appwiz.cpl/addons.c) so they always
-# match the engine and auto-track a CrossOver bump - no hardcoding. mscoree looks for the runtime
-# at share/wine/mono/wine-mono-<MONO_VERSION>/ and mshtml at share/wine/gecko/wine-gecko-<ver>-<arch>/.
-echo "==> Bundling wine-mono + wine-gecko (offline .NET/Gecko, no first-launch download prompt)"
+echo "==> Bundling Wine Mono and Gecko"
 ADDONS="${SRC}/dlls/appwiz.cpl/addons.c"
 MONO_VERSION="$(awk -F'"' '/#define[[:space:]]+MONO_VERSION/{print $2; exit}' "${ADDONS}")"
 GECKO_VERSION="$(awk -F'"' '/#define[[:space:]]+GECKO_VERSION/{print $2; exit}' "${ADDONS}")"
-[ -n "${MONO_VERSION}" ] && [ -n "${GECKO_VERSION}" ] || { echo "ERROR: could not read MONO/GECKO version from ${ADDONS}"; exit 1; }
-echo "    wine-mono ${MONO_VERSION}, wine-gecko ${GECKO_VERSION} (parsed from addons.c)"
+[ -n "${MONO_VERSION}" ] && [ -n "${GECKO_VERSION}" ] \
+  || fail "could not read Wine Mono/Gecko versions from ${ADDONS}"
 
 MONO_DIR="${STAGE}/share/wine/mono"
 GECKO_DIR="${STAGE}/share/wine/gecko"
 mkdir -p "${MONO_DIR}" "${GECKO_DIR}"
 
-fetch() {  # url cache_path  - download once, reuse on re-runs (like the source tarball)
-  [ -f "$2" ] || curl -fL "$1" -o "$2"
-}
-
-# wine-mono ships a single universal (32+64-bit) "-x86" packager tarball that extracts to
-# wine-mono-<ver>/ (bin/lib/etc/support); wine-gecko ships per-arch tarballs, both needed (WoW64).
 MONO_TARBALL="/tmp/wine-mono-${MONO_VERSION}-x86.tar.xz"
-fetch "https://dl.winehq.org/wine/wine-mono/${MONO_VERSION}/wine-mono-${MONO_VERSION}-x86.tar.xz" "${MONO_TARBALL}"
+download_cached \
+  "https://dl.winehq.org/wine/wine-mono/${MONO_VERSION}/wine-mono-${MONO_VERSION}-x86.tar.xz" \
+  "${MONO_TARBALL}"
 tar -xJf "${MONO_TARBALL}" -C "${MONO_DIR}"
-for GARCH in x86 x86_64; do
-  GTB="/tmp/wine-gecko-${GECKO_VERSION}-${GARCH}.tar.xz"
-  fetch "https://dl.winehq.org/wine/wine-gecko/${GECKO_VERSION}/wine-gecko-${GECKO_VERSION}-${GARCH}.tar.xz" "${GTB}"
-  tar -xJf "${GTB}" -C "${GECKO_DIR}"
+
+for gecko_arch in x86 x86_64; do
+  gecko_tarball="/tmp/wine-gecko-${GECKO_VERSION}-${gecko_arch}.tar.xz"
+  download_cached \
+    "https://dl.winehq.org/wine/wine-gecko/${GECKO_VERSION}/wine-gecko-${GECKO_VERSION}-${gecko_arch}.tar.xz" \
+    "${gecko_tarball}"
+  tar -xJf "${gecko_tarball}" -C "${GECKO_DIR}"
 done
 
-# Sanity: the extracted dir names must match exactly what mscoree/mshtml look for.
-[ -d "${MONO_DIR}/wine-mono-${MONO_VERSION}" ] || { echo "ERROR: wine-mono did not extract to wine-mono-${MONO_VERSION}"; exit 1; }
-[ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86_64" ] && [ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86" ] \
-  || { echo "ERROR: wine-gecko did not extract to wine-gecko-${GECKO_VERSION}-{x86,x86_64}"; exit 1; }
-echo "==> Mono/Gecko bundled (share/wine/mono/wine-mono-${MONO_VERSION}, share/wine/gecko/wine-gecko-${GECKO_VERSION}-*)"
+[ -d "${MONO_DIR}/wine-mono-${MONO_VERSION}" ] \
+  || fail "Wine Mono extracted to an unexpected directory"
+[ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86" ] \
+  || fail "32-bit Wine Gecko extracted to an unexpected directory"
+[ -d "${GECKO_DIR}/wine-gecko-${GECKO_VERSION}-x86_64" ] \
+  || fail "64-bit Wine Gecko extracted to an unexpected directory"
 
 echo "==> Bundling native runtime dependencies"
 BUNDLE_LIB_DIR="${STAGE}/lib"
 BUNDLE_DEPS="${WORK}/bundle-native-deps.txt"
+BUNDLE_DEPS_SORTED="${WORK}/bundle-native-deps.sorted.txt"
+MACHO_FILES="${WORK}/macho-files.txt"
+OTOOL_DEPS="${WORK}/otool-deps.txt"
 mkdir -p "${BUNDLE_LIB_DIR}"
 
 collect_external_deps() {
-  : > "$1"
-  find "${STAGE}" \( -path "${STAGE}/share/wine/mono" -o -path "${STAGE}/share/wine/gecko" \) -prune -o \
-    -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print0 2>/dev/null \
-    | while IFS= read -r -d '' f; do
-        if file "$f" | grep -q Mach-O; then
-          otool -L "$f" | awk 'NR > 1 { print $1 }' | while IFS= read -r dep; do
-            case "$dep" in
-              /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
-              *)
-                # Use a non-whitespace separator. The former TAB-separated format was parsed
-                # inconsistently by the macOS /bin/sh read/IFS path and joined owner+dependency
-                # into one field, producing a false "dependency not found" at the end of a build.
-                case "$f$dep" in
-                  *'|'*)
-                    echo "ERROR: unsupported '|' character in dependency path: $f -> $dep" >&2
-                    exit 2
-                    ;;
-                esac
-                printf '%s|%s\n' "$f" "$dep" >> "$1"
-                ;;
-            esac
-          done
-        fi
-      done
+  output=$1
+  : > "${output}"
+  : > "${MACHO_FILES}"
+
+  find "${STAGE}" \
+    \( -path "${STAGE}/share/wine/mono" -o -path "${STAGE}/share/wine/gecko" \) -prune -o \
+    -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print 2>/dev/null \
+    > "${MACHO_FILES}"
+
+  while IFS= read -r owner; do
+    file "${owner}" | grep -q 'Mach-O' || continue
+    otool -L "${owner}" | awk 'NR > 1 { print $1 }' > "${OTOOL_DEPS}"
+
+    while IFS= read -r dependency; do
+      case "${dependency}" in
+        /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*|'')
+          ;;
+        *'|'*)
+          fail "unsupported '|' character in dependency path: ${owner} -> ${dependency}"
+          ;;
+        *)
+          printf '%s|%s\n' "${owner}" "${dependency}" >> "${output}"
+          ;;
+      esac
+    done < "${OTOOL_DEPS}"
+  done < "${MACHO_FILES}"
 }
 
 bundle_external_deps() {
-  BUNDLE_DEPS_SORTED="${WORK}/bundle-native-deps.sorted.txt"
-
   collect_external_deps "${BUNDLE_DEPS}"
-  [ -s "${BUNDLE_DEPS}" ] || return 1  # no external dependencies remain
+  [ -s "${BUNDLE_DEPS}" ] || return 1
 
   LC_ALL=C sort -u "${BUNDLE_DEPS}" > "${BUNDLE_DEPS_SORTED}"
 
-  # Input redirection keeps this loop in the current shell. A piped while-loop runs in a
-  # subshell on macOS /bin/sh, so its previous `exit 1` could be swallowed by the outer
-  # `while bundle_external_deps`; the script then continued into the audit after an error.
-  while IFS='|' read -r owner dep; do
-    if [ -z "${owner}" ] || [ -z "${dep}" ]; then
-      echo "ERROR: malformed native dependency record: ${owner}|${dep}" >&2
-      return 2
-    fi
+  while IFS='|' read -r owner dependency; do
+    [ -n "${owner}" ] && [ -n "${dependency}" ] \
+      || fail "malformed native dependency record: ${owner}|${dependency}"
+    [ -f "${owner}" ] || fail "dependency owner not found: ${owner}"
+    [ -f "${dependency}" ] \
+      || fail "dependency not found: ${owner#${STAGE}/} -> ${dependency}"
 
-    if [ ! -f "${owner}" ]; then
-      echo "ERROR: dependency owner not found: ${owner}" >&2
-      return 2
-    fi
+    leaf="$(basename "${dependency}")"
+    destination="${BUNDLE_LIB_DIR}/${leaf}"
 
-    if [ ! -f "${dep}" ]; then
-      echo "ERROR: dependency not found: ${owner#${STAGE}/} -> ${dep}" >&2
-      return 2
-    fi
-
-    leaf="$(basename "${dep}")"
-    dest="${BUNDLE_LIB_DIR}/${leaf}"
-
-    if [ ! -f "${dest}" ]; then
-      cp -p "${dep}" "${dest}"
-      chmod u+w "${dest}" 2>/dev/null || true
-      install_name_tool -id "@loader_path/${leaf}" "${dest}" 2>/dev/null || true
+    if [ ! -f "${destination}" ]; then
+      cp -p "${dependency}" "${destination}"
+      chmod u+w "${destination}" 2>/dev/null || true
+      install_name_tool -id "@loader_path/${leaf}" "${destination}" 2>/dev/null || true
       echo "    bundled ${leaf}"
     fi
 
@@ -496,10 +767,8 @@ bundle_external_deps() {
       *) replacement="@rpath/${leaf}" ;;
     esac
 
-    if ! install_name_tool -change "${dep}" "${replacement}" "${owner}"; then
-      echo "ERROR: failed to rewrite dependency: ${owner#${STAGE}/}: ${dep} -> ${replacement}" >&2
-      return 2
-    fi
+    install_name_tool -change "${dependency}" "${replacement}" "${owner}" \
+      || fail "could not rewrite dependency: ${owner#${STAGE}/}: ${dependency} -> ${replacement}"
   done < "${BUNDLE_DEPS_SORTED}"
 
   return 0
@@ -507,7 +776,7 @@ bundle_external_deps() {
 
 while :; do
   if bundle_external_deps; then
-    : # bundled one dependency layer; rescan to collect transitive dylibs
+    :
   else
     bundle_status=$?
     [ "${bundle_status}" -eq 1 ] && break
@@ -519,25 +788,27 @@ echo "==> Auditing native runtime dependencies"
 BAD_DEPS="${WORK}/bad-native-deps.txt"
 collect_external_deps "${BAD_DEPS}"
 if [ -s "${BAD_DEPS}" ]; then
-  echo "ERROR: non-system native dependencies found in the Wine artifact:"
-  awk -F "$(printf '\t')" '{ print $1 " -> " $2 }' "${BAD_DEPS}"
-  echo "Bundle these libraries in wswine.bundle/lib or disable the feature before release."
+  echo "ERROR: non-system native dependencies remain in the Wine artifact:" >&2
+  awk -F '|' '{ print "  " $1 " -> " $2 }' "${BAD_DEPS}" >&2
   exit 1
 fi
 
-echo "==> Ad-hoc signing"
-# Sign only the native Mach-O modules. A `while read -d ''` loop (NOT `xargs -I{}`, which now hits
-# "command line cannot be assembled, too long" because the bundled mono/gecko trees add thousands of
-# files) handles any file count; prune those PE/managed trees up front since they never contain Mach-O.
-find "${STAGE}" \( -path "${STAGE}/share/wine/mono" -o -path "${STAGE}/share/wine/gecko" \) -prune -o \
-  -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print0 2>/dev/null \
-  | while IFS= read -r -d '' f; do
-      file "$f" | grep -q Mach-O && codesign --force -s - "$f" 2>/dev/null || true
-    done
+echo "==> Ad-hoc signing native Mach-O files"
+: > "${MACHO_FILES}"
+find "${STAGE}" \
+  \( -path "${STAGE}/share/wine/mono" -o -path "${STAGE}/share/wine/gecko" \) -prune -o \
+  -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print 2>/dev/null \
+  > "${MACHO_FILES}"
+
+while IFS= read -r file_path; do
+  file "${file_path}" | grep -q 'Mach-O' || continue
+  codesign --force -s - "${file_path}" >/dev/null \
+    || fail "could not sign ${file_path#${STAGE}/}"
+done < "${MACHO_FILES}"
 
 echo "==> Packing ${OUTPUT_NAME}"
 cd "${WORK}/stage"
-COPYFILE_DISABLE=1 tar --options xz:compression-level=6 -cJf "${OUT_DIR}/${OUTPUT_NAME}" wswine.bundle
+COPYFILE_DISABLE=1 XZ_OPT=-6 tar -cJf "${OUT_DIR}/${OUTPUT_NAME}" wswine.bundle
+[ -s "${OUT_DIR}/${OUTPUT_NAME}" ] || fail "output archive was not created"
 
 echo "==> Done: ${OUT_DIR}/${OUTPUT_NAME}"
-rm -rf "${WORK}"

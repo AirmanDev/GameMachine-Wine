@@ -61,17 +61,8 @@ echo "    brew: ${BREW}"
 # current) so the PE build is reproducible. To change toolchains, flip MINGW_GCC_VERSION + XPACK_RELEASE
 # + XPACK_SHA256 together (XPACK_HOST stays darwin-x64 for the Rosetta build).
 #
-# WHY 15.2.0 NOW (and why 13.2.0 was pinned before): we used to pin 13.2.0 as "CrossOver's exact PE
-# compiler", on the theory that Blizzard's "eidolon" anti-tamper (Overwatch 2, D2R, D4) was sensitive
-# to the exact PE codegen. That theory was WRONG. The real eidolon fix is the CrossOver loader hook
-# ("CW HACK 22434") compiled into this engine plus the app's CX_APPLEGPTK_LIBD3DSHARED_PATH env, which
-# registers every loaded PE code range as NON-NATIVE with Rosetta (docs/WineBuildStatus.md §13). With
-# that in place, our own from-source 13.2.0 build, the 13.4.0 build AND the 15.2.0 build all behaved
-# the same way regarding eidolon - so the GCC version was never the cause. We therefore test the latest
-# xPack GCC (15.2.0) and verify on a real machine. To fall back to the 13.2.0 CrossOver-parity
-# toolchain, set:
-#   MINGW_GCC_VERSION=13.2.0 XPACK_RELEASE=13.2.0-1 \
-#   XPACK_SHA256=9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae ./build-wine.sh
+# The GCC version is NOT the anti-tamper fix (the real fix is the CW HACK 22434 loader hook).
+# We use the latest xPack GCC (15.2.0), validated on a real machine.
 #
 # The xPack tarball ships BOTH i686 + x86_64 targets; XPACK_HOST=darwin-x64 runs natively on an Intel
 # runner and under Rosetta on Apple Silicon (the whole build runs under `arch -x86_64`).
@@ -220,18 +211,27 @@ CEOF
   grep -q 'GameMachine HACK: forcing --use-gl=swiftshader' "${PROC}" || { echo "ERROR: Steam CEF patch did not apply"; exit 1; }
 fi
 
-# GameMachine: Disable Metal HUD on launcher processes at the UNIX level.
-# Apple's Metal Performance HUD is forced onto any window created by a process with MTL_HUD_ENABLED=1.
-# For store launchers (Steam, Epic, Ubisoft), this pollutes the CEF/web UI.
-# By unsetting it in the UNIX environment inside ntdll/unix/loader.c immediately AFTER init_environment(),
-# the Windows environment block retains the variable (so games inherit it), but the macOS Metal framework
-# won't see it on the launcher process.
+# GameMachine: Route the Metal HUD per Windows process.
+#
+# A launcher process must not show Apple's Metal Performance HUD, but a game started by that launcher
+# still needs the user's original HUD setting. Merely calling unsetenv("MTL_HUD_ENABLED") in loader.c
+# is not enough: Wine creates Windows children by fork()+exec(), and the new Unix loader inherits the
+# launcher's CURRENT native environment. Therefore the old patch also disabled the HUD in every game
+# started by Epic/Ubisoft/Steam.
+#
+# The fix has two parts:
+#   1. loader.c saves the original setting in GM_MTL_HUD_ENABLED, then removes MTL_HUD_ENABLED only
+#      from known launcher/UI processes.
+#   2. process.c restores the saved setting in the forked child before exec_wineloader(), except when
+#      that child is itself another launcher/UI helper.
+#
+# This keeps launcher windows clean while launcher-started games get the HUD again.
 LOADER_UNIX="${SRC}/dlls/ntdll/unix/loader.c"
-if ! grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}"; then
-  echo "==> Patching loader.c: disable Metal HUD on launcher processes"
+if ! grep -q 'GameMachine HACK: preserve Metal HUD setting for launcher children' "${LOADER_UNIX}"; then
+  echo "==> Patching loader.c: hide Metal HUD on launcher processes and preserve the setting"
   cat > "${WORK}/gm-hud-disable.c" <<'CEOF'
 
-    /* GameMachine HACK: Disable Metal HUD on launcher processes at the UNIX level. */
+    /* GameMachine HACK: preserve Metal HUD setting for launcher children, then hide it here. */
     {
         extern int *_NSGetArgc(void);
         extern char ***_NSGetArgv(void);
@@ -240,9 +240,12 @@ if ! grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}"; then
         int gm_i;
         for (gm_i = 0; gm_i < gm_argc; gm_i++) {
             if (gm_argv[gm_i] && (strstr(gm_argv[gm_i], "steam.exe") || strstr(gm_argv[gm_i], "steamwebhelper.exe") ||
-                                  strstr(gm_argv[gm_i], "EpicGamesLauncher.exe") || strstr(gm_argv[gm_i], "upc.exe") ||
-                                  strstr(gm_argv[gm_i], "UplayWebCore.exe")))
+                                  strstr(gm_argv[gm_i], "EpicGamesLauncher.exe") || strstr(gm_argv[gm_i], "EpicWebHelper.exe") ||
+                                  strstr(gm_argv[gm_i], "upc.exe") || strstr(gm_argv[gm_i], "UplayWebCore.exe")))
             {
+                const char *gm_hud = getenv("MTL_HUD_ENABLED");
+                if (gm_hud && !getenv("GM_MTL_HUD_ENABLED"))
+                    setenv("GM_MTL_HUD_ENABLED", gm_hud, 1);
                 unsetenv("MTL_HUD_ENABLED");
                 break;
             }
@@ -251,9 +254,59 @@ if ! grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}"; then
 CEOF
   GM_BLOCK="${WORK}/gm-hud-disable.c" perl -0777 -i -pe '
     BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
-    s/(init_environment\s*\([^\)]*\)\s*;)/$1\n$b/g;
+    s/(start_main_thread\s*\(\)\s*;)/$b\n    $1/g;
   ' "${LOADER_UNIX}"
-  grep -q 'MTL_HUD_ENABLED' "${LOADER_UNIX}" || { echo "ERROR: Metal HUD patch did not apply"; exit 1; }
+  grep -q 'GameMachine HACK: preserve Metal HUD setting for launcher children' "${LOADER_UNIX}" \
+    || { echo "ERROR: launcher Metal HUD patch did not apply"; exit 1; }
+fi
+
+PROC_UNIX="${SRC}/dlls/ntdll/unix/process.c"
+if ! grep -q 'GameMachine HACK: restore Metal HUD for launcher-spawned games' "${PROC_UNIX}"; then
+  echo "==> Patching process.c: restore Metal HUD for games started by launchers"
+  cat > "${WORK}/gm-hud-child.c" <<'CEOF'
+
+#ifdef __APPLE__
+            /* GameMachine HACK: restore Metal HUD for launcher-spawned games.
+               spawn_process() forks from the current Wine process, so a launcher's unset native
+               MTL_HUD_ENABLED would otherwise propagate to every child. Route the saved value by
+               the child image name before exec_wineloader(). */
+            {
+                const char *gm_saved_hud = getenv("GM_MTL_HUD_ENABLED");
+                char gm_image[2048];
+                int gm_len = 0;
+                BOOL gm_launcher = FALSE;
+
+                if (params->ImagePathName.Buffer)
+                {
+                    gm_len = ntdll_wcstoumbs( params->ImagePathName.Buffer,
+                                             params->ImagePathName.Length / sizeof(WCHAR),
+                                             gm_image, sizeof(gm_image) - 1, FALSE );
+                    if (gm_len > 0)
+                    {
+                        gm_image[gm_len] = 0;
+                        gm_launcher =
+                            strstr(gm_image, "steam.exe") ||
+                            strstr(gm_image, "steamwebhelper.exe") ||
+                            strstr(gm_image, "EpicGamesLauncher.exe") ||
+                            strstr(gm_image, "EpicWebHelper.exe") ||
+                            strstr(gm_image, "upc.exe") ||
+                            strstr(gm_image, "UplayWebCore.exe");
+                    }
+                }
+
+                if (gm_launcher)
+                    unsetenv("MTL_HUD_ENABLED");
+                else if (gm_saved_hud)
+                    setenv("MTL_HUD_ENABLED", gm_saved_hud, 1);
+            }
+#endif
+CEOF
+  GM_BLOCK="${WORK}/gm-hud-child.c" perl -0777 -i -pe '
+    BEGIN { local $/; open my $f,"<",$ENV{GM_BLOCK} or die "$!"; our $b=<$f> }
+    s{(\n\s*if \(winedebug\) putenv\( winedebug \);)}{$1$b};
+  ' "${PROC_UNIX}"
+  grep -q 'GameMachine HACK: restore Metal HUD for launcher-spawned games' "${PROC_UNIX}" \
+    || { echo "ERROR: child Metal HUD routing patch did not apply"; exit 1; }
 fi
 
 # Keep winemac.drv symbols visible for DXMT. CrossOver already exports them; default visibility makes
@@ -380,7 +433,18 @@ collect_external_deps() {
           otool -L "$f" | awk 'NR > 1 { print $1 }' | while IFS= read -r dep; do
             case "$dep" in
               /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
-              *) printf '%s	%s\n' "$f" "$dep" >> "$1" ;;
+              *)
+                # Use a non-whitespace separator. The former TAB-separated format was parsed
+                # inconsistently by the macOS /bin/sh read/IFS path and joined owner+dependency
+                # into one field, producing a false "dependency not found" at the end of a build.
+                case "$f$dep" in
+                  *'|'*)
+                    echo "ERROR: unsupported '|' character in dependency path: $f -> $dep" >&2
+                    exit 2
+                    ;;
+                esac
+                printf '%s|%s\n' "$f" "$dep" >> "$1"
+                ;;
             esac
           done
         fi
@@ -388,11 +452,32 @@ collect_external_deps() {
 }
 
 bundle_external_deps() {
-  collect_external_deps "${BUNDLE_DEPS}"
-  [ -s "${BUNDLE_DEPS}" ] || return 1
+  BUNDLE_DEPS_SORTED="${WORK}/bundle-native-deps.sorted.txt"
 
-  sort -u "${BUNDLE_DEPS}" | while IFS="$(printf '\t')" read -r owner dep; do
-    [ -f "${dep}" ] || { echo "ERROR: dependency not found: ${owner#${STAGE}/} -> ${dep}"; exit 1; }
+  collect_external_deps "${BUNDLE_DEPS}"
+  [ -s "${BUNDLE_DEPS}" ] || return 1  # no external dependencies remain
+
+  LC_ALL=C sort -u "${BUNDLE_DEPS}" > "${BUNDLE_DEPS_SORTED}"
+
+  # Input redirection keeps this loop in the current shell. A piped while-loop runs in a
+  # subshell on macOS /bin/sh, so its previous `exit 1` could be swallowed by the outer
+  # `while bundle_external_deps`; the script then continued into the audit after an error.
+  while IFS='|' read -r owner dep; do
+    if [ -z "${owner}" ] || [ -z "${dep}" ]; then
+      echo "ERROR: malformed native dependency record: ${owner}|${dep}" >&2
+      return 2
+    fi
+
+    if [ ! -f "${owner}" ]; then
+      echo "ERROR: dependency owner not found: ${owner}" >&2
+      return 2
+    fi
+
+    if [ ! -f "${dep}" ]; then
+      echo "ERROR: dependency not found: ${owner#${STAGE}/} -> ${dep}" >&2
+      return 2
+    fi
+
     leaf="$(basename "${dep}")"
     dest="${BUNDLE_LIB_DIR}/${leaf}"
 
@@ -410,11 +495,25 @@ bundle_external_deps() {
       lib/*) replacement="@loader_path/${leaf}" ;;
       *) replacement="@rpath/${leaf}" ;;
     esac
-    install_name_tool -change "${dep}" "${replacement}" "${owner}"
-  done
+
+    if ! install_name_tool -change "${dep}" "${replacement}" "${owner}"; then
+      echo "ERROR: failed to rewrite dependency: ${owner#${STAGE}/}: ${dep} -> ${replacement}" >&2
+      return 2
+    fi
+  done < "${BUNDLE_DEPS_SORTED}"
+
+  return 0
 }
 
-while bundle_external_deps; do :; done
+while :; do
+  if bundle_external_deps; then
+    : # bundled one dependency layer; rescan to collect transitive dylibs
+  else
+    bundle_status=$?
+    [ "${bundle_status}" -eq 1 ] && break
+    exit "${bundle_status}"
+  fi
+done
 
 echo "==> Auditing native runtime dependencies"
 BAD_DEPS="${WORK}/bad-native-deps.txt"

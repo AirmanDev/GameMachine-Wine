@@ -70,15 +70,7 @@ place to change. The PE DLLs are built without `-g` and `--strip-all`-stripped (
 for parity/size). GCC 15 defaults to C23, so the script pins `CROSSCFLAGS=-std=gnu17` on the PE side -
 without it Wine PE code that uses `bool` as an identifier (e.g. `programs/winhlp32/macro.h`) won't compile.
 
-The GCC version is **not** the anti-tamper fix. We previously pinned **13.2.0** ("CrossOver's exact PE
-compiler") on a theory that the exact PE codegen mattered for code-scanning anti-tamper under Rosetta
-(Blizzard's `eidolon` - Overwatch 2, D2R, D4). That theory was wrong: with the real fix in place (the
-loader hook below) our 13.2.0, 13.4.0 and 15.2.0 builds all behave the same, so the version never
-mattered. We now build with the latest GCC (15.2.0) and verify on a real machine. To fall back to the
-13.2.0 CrossOver-parity toolchain, run:
-
-    MINGW_GCC_VERSION=13.2.0 XPACK_RELEASE=13.2.0-1 \
-        XPACK_SHA256=9c2bb3841b991dc07481507f76304397fd1b61ec8cfea973a9fb96dc12c038ae ./build-wine.sh
+The GCC version is **not** an anti-tamper factor. The build uses the latest GCC 15.2.0. The actual anti-tamper mitigation (for Blizzard's `eidolon` and others) is handled by the `CW HACK 22434` loader hook, not the PE compiler version (see the non-native code-region section below).
 
 ## D3DMetal under Rosetta: non-native code-region registration
 

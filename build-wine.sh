@@ -387,14 +387,13 @@ fi
 
 LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 
-# CrossOver's named hardlink/symlink is not enough for the Dock on current macOS:
-# accessibility and Dock process names can still resolve to the original "wine"
-# executable. Use a named temp copy, then name it from the GameMachine launch settings.
-DOCK_LINK_MARKER='GameMachine: name the Dock link from launch settings'
-if ! grep -q "${DOCK_LINK_MARKER}" "${LOADER}"; then
+# The Dock process name comes from the executable identity, so each managed
+# Wine process runs through a display-name-specific copy of the loader.
+DOCK_PROCESS_MARKER='GameMachine: name the Dock process from launch settings'
+if ! grep -q "${DOCK_PROCESS_MARKER}" "${LOADER}"; then
   echo "==> Patching ntdll loader: Dock process name from launch settings"
-  cat > "${WORK}/gm-dock-link.c" <<'CEOF'
-/* GameMachine: name the Dock link from launch settings. Prefer the display name that
+  cat > "${WORK}/gm-dock-process.c" <<'CEOF'
+/* GameMachine: name the Dock process from launch settings. Prefer the display name that
  * matches this executable, otherwise the primary launch name, so launcher helper
  * processes and games show the GameMachine name on the Dock instead of the raw
  * executable name. Returns NULL (keep the executable name) without launch settings. */
@@ -491,7 +490,7 @@ done:
 CEOF
   insert_before_literal "${LOADER}" \
     'static void replace_wineloader_path_with_link(char **wineloader_path, const char *image_path)' \
-    "${WORK}/gm-dock-link.c"
+    "${WORK}/gm-dock-process.c"
   python3 - "${LOADER}" <<'PYLOADER'
 from pathlib import Path
 import sys
@@ -506,63 +505,53 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1)
 
 
+def replace_c_function(text, signature, replacement, label):
+    count = text.count(signature)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+
+    start = text.index(signature)
+    body_start = text.index("{", start)
+    depth = 0
+    for index in range(body_start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                while end < len(text) and text[end] in "\r\n":
+                    end += 1
+                return text[:start] + replacement + text[end:]
+
+    raise SystemExit(f"ERROR: {label} function end not found")
+
+
 loader = loader_path.read_text(encoding="utf-8")
 
-loader = replace_once(
+loader = replace_c_function(
     loader,
+    "static char *create_preloader_link(const char *wineloader_path, const char *exe_name)",
     """static char *create_preloader_link(const char *wineloader_path, const char *exe_name)
 {
-    struct stat st;
-    char *linkpath = create_tempdir(wineloader_path);
+    struct stat source_st;
+    char *copy_path = create_tempdir(wineloader_path);
 
-    if (!linkpath)
-        return NULL;
-
-    if (strlcat(linkpath, exe_name, MAX_PATH) >= MAX_PATH)
-        goto fail;
-
-    /* If the link already exists, use it (if it's in this dir, it points to the right place). */
-    if (!stat(linkpath, &st))
-        return linkpath;
-
-    /* Try a hard link first, to avoid the little "alias" arrow that the Dock puts on the icon.
-     * But if that fails, fall back to a symlink.
-     */
-    if (!link(wineloader_path, linkpath) || !symlink(wineloader_path, linkpath))
-        return linkpath;
-
-fail:
-    free(linkpath);
-    return NULL;
-}
-""",
-    """static char *create_preloader_link(const char *wineloader_path, const char *exe_name)
-{
-    struct stat source_st, link_st;
-    char *linkpath = create_tempdir(wineloader_path);
-
-    if (!linkpath)
+    if (!copy_path)
         return NULL;
 
     if (stat(wineloader_path, &source_st))
         goto fail;
 
-    if (strlcat(linkpath, exe_name, MAX_PATH) >= MAX_PATH)
+    if (strlcat(copy_path, exe_name, MAX_PATH) >= MAX_PATH)
         goto fail;
 
-    if (!lstat(linkpath, &link_st))
-    {
-        if (S_ISREG(link_st.st_mode) && link_st.st_ino != source_st.st_ino &&
-            link_st.st_size == source_st.st_size)
-            return linkpath;
-        unlink(linkpath);
-    }
-
-    if (!gamemachine_copy_file(wineloader_path, linkpath, source_st.st_mode))
-        return linkpath;
+    if (!gamemachine_copy_file(wineloader_path, copy_path, source_st.st_mode))
+        return copy_path;
 
 fail:
-    free(linkpath);
+    free(copy_path);
     return NULL;
 }
 """,
@@ -579,8 +568,8 @@ loader = replace_once(
 
 loader_path.write_text(loader, encoding="utf-8")
 PYLOADER
-  grep -q "${DOCK_LINK_MARKER}" "${LOADER}" \
-    || fail "Dock link name patch did not apply"
+  grep -q "${DOCK_PROCESS_MARKER}" "${LOADER}" \
+    || fail "Dock process name patch did not apply"
   grep -q 'gamemachine_copy_file' "${LOADER}" \
     || fail "Dock executable copy patch did not apply"
 fi

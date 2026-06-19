@@ -4,7 +4,7 @@ set -eu
 
 CX_VERSION="${CX_VERSION:-26.2.0}"
 BUILD_TAG="${BUILD_TAG:-v1}"
-OUTPUT_NAME="${OUTPUT_NAME:-gamemachine-wine-v1-osx64.tar.xz}"
+OUTPUT_NAME="${OUTPUT_NAME:-gamemachine-wine-${BUILD_TAG}-osx64.tar.xz}"
 MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 SOURCE_URL="${SOURCE_URL:-https://media.codeweavers.com/pub/crossover/source/crossover-sources-${CX_VERSION}.tar.gz}"
 SOURCE_SHA256="${SOURCE_SHA256:-}"
@@ -168,23 +168,27 @@ cat > "${SRC}/programs/winedbg/distversion.h" <<'EOF'
 EOF
 
 
-# App-specific helpers may keep normal windows while remaining outside the macOS Dock.
+# macOS application identity: helper processes can stay outside the Dock, while
+# visible Wine processes receive the launcher/game name supplied by GameMachine.
 MACDRV_MAIN="${SRC}/dlls/winemac.drv/macdrv_main.c"
 MACDRV_COCOA="${SRC}/dlls/winemac.drv/macdrv_cocoa.h"
 COCOA_APP="${SRC}/dlls/winemac.drv/cocoa_app.m"
-if ! grep -q '"HideDockIcon"' "${MACDRV_MAIN}"; then
-  echo "==> Patching winemac.drv: app-specific Dock visibility"
+DOCK_IDENTITY_MARKER='GameMachine: derive the macOS application identity'
+if ! grep -q "${DOCK_IDENTITY_MARKER}" "${MACDRV_MAIN}"; then
+  echo "==> Patching winemac.drv: macOS application identity"
   python3 - "${MACDRV_MAIN}" "${MACDRV_COCOA}" "${COCOA_APP}" <<'PYDOCK'
 from pathlib import Path
 import sys
 
 main_path, cocoa_path, app_path = map(Path, sys.argv[1:])
 
+
 def replace_once(text, old, new, label):
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
     return text.replace(old, new, 1)
+
 
 main = main_path.read_text(encoding="utf-8")
 cocoa = cocoa_path.read_text(encoding="utf-8")
@@ -193,48 +197,185 @@ app = app_path.read_text(encoding="utf-8")
 main = replace_once(
     main,
     "bool enable_app_nap = false;\n",
-    "bool enable_app_nap = false;\nbool hide_dock_icon = false;\n",
-    "macdrv global",
+    "bool enable_app_nap = false;\nbool application_is_background = false;\nchar *application_display_name;\nchar *application_icon_path;\n",
+    "macdrv globals",
 )
 main = replace_once(
     main,
-    '''    if (!get_config_key(hkey, appkey, "EnableAppNap", buffer, sizeof(buffer)))
-        enable_app_nap = IS_OPTION_TRUE(buffer[0]);
-''',
-    '''    if (!get_config_key(hkey, appkey, "EnableAppNap", buffer, sizeof(buffer)))
-        enable_app_nap = IS_OPTION_TRUE(buffer[0]);
+    """    len = lstrlenW(appname);
 
-    if (!get_config_key(hkey, appkey, "HideDockIcon", buffer, sizeof(buffer)))
-        hide_dock_icon = IS_OPTION_TRUE(buffer[0]);
-''',
-    "macdrv registry option",
+    if (len && len < MAX_PATH)
+""",
+    """    len = lstrlenW(appname);
+
+    /* GameMachine: derive the macOS application identity from launch settings.
+       Every managed process adopts the display name and icon that match its
+       executable, otherwise the primary launch entry, so a launcher and its
+       embedded browser helpers (steamwebhelper.exe, EpicWebHelper.exe,
+       UplayWebCore.exe) all present the launcher name and icon instead of "wine".
+       An executable flagged as background (the launcher client behind the embedded
+       browser UI) activates as an accessory, so the visible helper owns the Dock. */
+    for (unsigned int i = 0;; i++)
+    {
+        char executable_key[64], name_key[64], icon_key[64], background_key[64];
+        const char *configured_executable, *configured_name, *configured_icon, *configured_background;
+        WCHAR configured_executableW[MAX_PATH];
+
+        snprintf(executable_key, sizeof(executable_key), "GAMEMACHINE_DOCK_EXECUTABLE_%u", i);
+        snprintf(name_key, sizeof(name_key), "GAMEMACHINE_DOCK_NAME_%u", i);
+        snprintf(icon_key, sizeof(icon_key), "GAMEMACHINE_DOCK_ICON_%u", i);
+        snprintf(background_key, sizeof(background_key), "GAMEMACHINE_DOCK_BACKGROUND_%u", i);
+        configured_executable = getenv(executable_key);
+        configured_name = getenv(name_key);
+        configured_icon = getenv(icon_key);
+        if (!configured_executable && !configured_name) break;
+        if (!configured_executable || !*configured_executable || !configured_name || !*configured_name) continue;
+
+        if (!application_display_name) application_display_name = strdup(configured_name);
+        if (!application_icon_path && configured_icon && *configured_icon)
+            application_icon_path = strdup(configured_icon);
+
+        if (strlen(configured_executable) >= ARRAY_SIZE(configured_executableW)) continue;
+        asciiz_to_unicode(configured_executableW, configured_executable);
+
+        if (!wcsicmp(appname, configured_executableW))
+        {
+            free(application_display_name);
+            application_display_name = strdup(configured_name);
+            if (configured_icon && *configured_icon)
+            {
+                free(application_icon_path);
+                application_icon_path = strdup(configured_icon);
+            }
+            configured_background = getenv(background_key);
+            application_is_background = configured_background && *configured_background == '1';
+            break;
+        }
+    }
+
+    if (len && len < MAX_PATH)
+""",
+    "application identity selection",
 )
+
 cocoa = replace_once(
     cocoa,
     "extern bool enable_app_nap;\n",
-    "extern bool enable_app_nap;\nextern bool hide_dock_icon;\n",
-    "macdrv declaration",
+    "extern bool enable_app_nap;\nextern bool application_is_background;\nextern char *application_display_name;\nextern char *application_icon_path;\n",
+    "macdrv declarations",
+)
+
+app = replace_once(
+    app,
+    '#import "cocoa_window.h"\n',
+    '#import "cocoa_window.h"\n#include <dlfcn.h>\n',
+    "dynamic loader include",
 )
 app = replace_once(
     app,
-    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
-    {
-        if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
-''',
-    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
-    {
-        if (hide_dock_icon)
-        {
-            if ([NSApp activationPolicy] != NSApplicationActivationPolicyAccessory)
-                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-            if (activateIfTransformed)
-                [self tryToActivateIgnoringOtherApps:YES];
-            return;
-        }
+    "bool macdrv_err_on;\n",
+    r"""bool macdrv_err_on;
 
+typedef CFTypeRef (*gm_get_application_asn_func)(void);
+typedef OSStatus (*gm_set_application_information_item_func)(
+    int, CFTypeRef, CFStringRef, CFStringRef, CFDictionaryRef *);
+
+static void set_launch_services_display_name(NSString *name)
+{
+    static gm_get_application_asn_func get_application_asn;
+    static gm_set_application_information_item_func set_application_information_item;
+    static CFStringRef display_name_key;
+    static void *application_services;
+    static dispatch_once_t once;
+
+    if (![name length]) return;
+
+    dispatch_once(&once, ^{
+        CFBundleRef launch_services;
+        CFStringRef *key;
+
+        application_services = dlopen(
+            "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
+            RTLD_LAZY | RTLD_LOCAL);
+        if (!application_services) return;
+
+        launch_services = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.LaunchServices"));
+        if (!launch_services) return;
+
+        get_application_asn = (gm_get_application_asn_func)
+            CFBundleGetFunctionPointerForName(
+                launch_services, CFSTR("_LSGetCurrentApplicationASN"));
+        set_application_information_item = (gm_set_application_information_item_func)
+            CFBundleGetFunctionPointerForName(
+                launch_services, CFSTR("_LSSetApplicationInformationItem"));
+        key = (CFStringRef *)CFBundleGetDataPointerForName(
+            launch_services, CFSTR("_kLSDisplayNameKey"));
+        if (key) display_name_key = *key;
+    });
+
+    if (get_application_asn && set_application_information_item && display_name_key)
+    {
+        ProcessSerialNumber psn;
+        CFTypeRef asn;
+
+        if (GetCurrentProcess(&psn) != noErr) return;
+        asn = get_application_asn();
+        if (asn)
+            set_application_information_item(
+                -2, asn, display_name_key, (CFStringRef)name, NULL);
+    }
+}
+""",
+    "LaunchServices display-name helper",
+)
+app = replace_once(
+    app,
+    """    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
-''',
+""",
+    """    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+    {
+        NSApplicationActivationPolicy desiredPolicy = application_is_background ?
+            NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular;
+        NSString *applicationName = application_display_name ?
+            [NSString stringWithUTF8String:application_display_name] : nil;
+
+        if ([NSApp activationPolicy] != desiredPolicy)
+""",
     "Cocoa activation policy",
+)
+app = replace_once(
+    app,
+    "            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];\n",
+    "            if ([applicationName length])\n"
+    "            {\n"
+    "                [[NSProcessInfo processInfo] setProcessName:applicationName];\n"
+    "                set_launch_services_display_name(applicationName);\n"
+    "            }\n"
+    "            [NSApp setActivationPolicy:desiredPolicy];\n",
+    "application identity activation",
+)
+app = replace_once(
+    app,
+    """            bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+""",
+    """            bundleName = [applicationName length] ? applicationName :
+                         [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+""",
+    "application menu name",
+)
+app = replace_once(
+    app,
+    "            [NSApp setApplicationIconImage:self.applicationIcon];\n",
+    "            {\n"
+    "                NSImage *dockIcon = nil;\n"
+    "                if (application_icon_path)\n"
+    "                    dockIcon = [[[NSImage alloc] initWithContentsOfFile:\n"
+    "                                 [NSString stringWithUTF8String:application_icon_path]] autorelease];\n"
+    "                [NSApp setApplicationIconImage:dockIcon ? dockIcon : self.applicationIcon];\n"
+    "            }\n",
+    "Dock icon from launch settings",
 )
 
 main_path.write_text(main, encoding="utf-8")
@@ -243,114 +384,64 @@ app_path.write_text(app, encoding="utf-8")
 PYDOCK
 fi
 
-# GameMachine: set per-executable macOS application names before Dock registration.
-MACDRV_MAIN="${SRC}/dlls/winemac.drv/macdrv_main.c"
-MACDRV_COCOA="${SRC}/dlls/winemac.drv/macdrv_cocoa.h"
-COCOA_APP="${SRC}/dlls/winemac.drv/cocoa_app.m"
-if ! grep -q 'GameMachine: set per-executable macOS application names' "${MACDRV_MAIN}"; then
-  echo "==> Patching winemac.drv: per-executable application names"
-  python3 - "${MACDRV_MAIN}" "${MACDRV_COCOA}" "${COCOA_APP}" <<'PYNAME'
-from pathlib import Path
-import sys
+LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 
-main_path, cocoa_path, app_path = map(Path, sys.argv[1:])
+# CrossOver already creates a descriptively-named link to the loader for the Dock
+# (CW HACK 22144, active when WINEDLLPATH is set). Name that link from the GameMachine
+# launch settings instead of the raw executable name, so the Dock shows "Steam" etc.
+DOCK_LINK_MARKER='GameMachine: name the Dock link from launch settings'
+if ! grep -q "${DOCK_LINK_MARKER}" "${LOADER}"; then
+  echo "==> Patching ntdll loader: Dock link name from launch settings"
+  cat > "${WORK}/gm-dock-link.c" <<'CEOF'
+/* GameMachine: name the Dock link from launch settings. Prefer the display name that
+ * matches this executable, otherwise the primary launch name, so launcher helper
+ * processes and games show the GameMachine name on the Dock instead of the raw
+ * executable name. Returns NULL (keep the executable name) without launch settings. */
+static char *gamemachine_dock_name(const char *image_path)
+{
+    const char *base = image_path, *p;
+    char *primary = NULL, *q;
+    unsigned int i;
 
+    if ((p = strrchr(base, '\\'))) base = p + 1;
+    if ((p = strrchr(base, '/'))) base = p + 1;
 
-def replace_once(text, old, new, label):
-    count = text.count(old)
-    if count != 1:
-        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
-    return text.replace(old, new, 1)
-
-
-main = main_path.read_text(encoding="utf-8")
-cocoa = cocoa_path.read_text(encoding="utf-8")
-app = app_path.read_text(encoding="utf-8")
-
-main = replace_once(
-    main,
-    "bool hide_dock_icon = false;\n",
-    "bool hide_dock_icon = false;\nchar *application_display_name;\n",
-    "application name global",
-)
-main = replace_once(
-    main,
-    '''    len = lstrlenW(appname);
-
-    if (len && len < MAX_PATH)
-''',
-    '''    len = lstrlenW(appname);
-
-    /* GameMachine: set per-executable macOS application names from the launch environment. */
-    for (unsigned int i = 0; i < 8; i++)
+    for (i = 0;; i++)
     {
         char executable_key[64], name_key[64];
         const char *configured_executable, *configured_name;
-        WCHAR configured_executableW[MAX_PATH];
-        size_t configured_length;
 
         snprintf(executable_key, sizeof(executable_key), "GAMEMACHINE_DOCK_EXECUTABLE_%u", i);
         snprintf(name_key, sizeof(name_key), "GAMEMACHINE_DOCK_NAME_%u", i);
         configured_executable = getenv(executable_key);
         configured_name = getenv(name_key);
+        if (!configured_executable && !configured_name) break;
         if (!configured_executable || !*configured_executable || !configured_name || !*configured_name) continue;
 
-        configured_length = strlen(configured_executable);
-        if (configured_length >= ARRAY_SIZE(configured_executableW)) continue;
-        asciiz_to_unicode(configured_executableW, configured_executable);
-
-        if (!wcsicmp(appname, configured_executableW))
+        if (!primary) primary = strdup(configured_name);
+        if (!strcasecmp(base, configured_executable))
         {
-            application_display_name = strdup(configured_name);
+            free(primary);
+            primary = strdup(configured_name);
             break;
         }
     }
 
-    if (len && len < MAX_PATH)
-''',
-    "application name selection",
-)
-cocoa = replace_once(
-    cocoa,
-    "extern bool hide_dock_icon;\n",
-    "extern bool hide_dock_icon;\nextern char *application_display_name;\n",
-    "application name declaration",
-)
-app = replace_once(
-    app,
-    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
-    {
-        if (hide_dock_icon)
-''',
-    '''    - (void) transformProcessToForeground:(BOOL)activateIfTransformed
-    {
-        if (application_display_name)
-        {
-            NSString *name = [NSString stringWithUTF8String:application_display_name];
-            if ([name length]) [[NSProcessInfo processInfo] setProcessName:name];
-        }
+    for (q = primary; q && *q; q++)
+        if (*q == '/') *q = '-';
 
-        if (hide_dock_icon)
-''',
-    "process name assignment",
-)
-app = replace_once(
-    app,
-    '''            bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
-''',
-    '''            bundleName = application_display_name ? [[NSProcessInfo processInfo] processName] :
-                         [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
-''',
-    "application menu name",
-)
+    return primary;
+}
 
-main_path.write_text(main, encoding="utf-8")
-cocoa_path.write_text(cocoa, encoding="utf-8")
-app_path.write_text(app, encoding="utf-8")
-PYNAME
+CEOF
+  insert_before_literal "${LOADER}" \
+    'static void replace_wineloader_path_with_link(char **wineloader_path, const char *image_path)' \
+    "${WORK}/gm-dock-link.c"
+  perl -0777 -i -pe 's/\Qchar *app_name = extract_exe_name(image_path);\E/char *app_name = gamemachine_dock_name(image_path);\n    if (!app_name) app_name = extract_exe_name(image_path);/' "${LOADER}"
+  grep -q "${DOCK_LINK_MARKER}" "${LOADER}" \
+    || fail "Dock link name patch did not apply"
 fi
 
-LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
   echo "==> Restoring WINEDLLPATH_PREPEND"
   cat > "${WORK}/gm-prepend.c" <<'CEOF'
@@ -493,7 +584,6 @@ CEOF
                 if (tidy_cmdline != cmd_line)
                     RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
                 tidy_cmdline = gm_cmdline;
-                FIXME( "GameMachine: enabled software rendering for an embedded browser process\n" );
             }
         }
     }

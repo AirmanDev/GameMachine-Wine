@@ -7,7 +7,7 @@ on:
         description: CrossOver source version
         default: "26.2.0"
       build_tag:
-        description: Release tag (the app pins this - keep "v1")
+        description: Release tag pinned by the app
         default: "v1"
 
 # macos-14 is arm64 but ships Xcode 15.4 (clang 15), which does not have the Xcode 16+ integrated

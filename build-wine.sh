@@ -341,6 +341,12 @@ app = replace_once(
         NSString *applicationName = application_display_name ?
             [NSString stringWithUTF8String:application_display_name] : nil;
 
+        if ([applicationName length])
+        {
+            [[NSProcessInfo processInfo] setProcessName:applicationName];
+            set_launch_services_display_name(applicationName);
+        }
+
         if ([NSApp activationPolicy] != desiredPolicy)
 """,
     "Cocoa activation policy",
@@ -348,11 +354,6 @@ app = replace_once(
 app = replace_once(
     app,
     "            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];\n",
-    "            if ([applicationName length])\n"
-    "            {\n"
-    "                [[NSProcessInfo processInfo] setProcessName:applicationName];\n"
-    "                set_launch_services_display_name(applicationName);\n"
-    "            }\n"
     "            [NSApp setActivationPolicy:desiredPolicy];\n",
     "application identity activation",
 )
@@ -386,12 +387,12 @@ fi
 
 LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 
-# CrossOver already creates a descriptively-named link to the loader for the Dock
-# (CW HACK 22144, active when WINEDLLPATH is set). Name that link from the GameMachine
-# launch settings instead of the raw executable name, so the Dock shows "Steam" etc.
+# CrossOver's named hardlink/symlink is not enough for the Dock on current macOS:
+# accessibility and Dock process names can still resolve to the original "wine"
+# executable. Use a named temp copy, then name it from the GameMachine launch settings.
 DOCK_LINK_MARKER='GameMachine: name the Dock link from launch settings'
 if ! grep -q "${DOCK_LINK_MARKER}" "${LOADER}"; then
-  echo "==> Patching ntdll loader: Dock link name from launch settings"
+  echo "==> Patching ntdll loader: Dock process name from launch settings"
   cat > "${WORK}/gm-dock-link.c" <<'CEOF'
 /* GameMachine: name the Dock link from launch settings. Prefer the display name that
  * matches this executable, otherwise the primary launch name, so launcher helper
@@ -433,13 +434,155 @@ static char *gamemachine_dock_name(const char *image_path)
     return primary;
 }
 
+static int gamemachine_copy_file(const char *source, const char *destination, mode_t mode)
+{
+    char temporary[MAX_PATH], buffer[65536];
+    int input = -1, output = -1, result = -1;
+    ssize_t bytes;
+
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", destination, (long)getpid())
+        >= sizeof(temporary))
+        return -1;
+
+    if ((input = open(source, O_RDONLY)) == -1)
+        goto done;
+    if ((output = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777)) == -1)
+        goto done;
+
+    while ((bytes = read(input, buffer, sizeof(buffer))) > 0)
+    {
+        char *cursor = buffer;
+        while (bytes > 0)
+        {
+            ssize_t written = write(output, cursor, bytes);
+            if (written <= 0)
+                goto done;
+            cursor += written;
+            bytes -= written;
+        }
+    }
+    if (bytes < 0)
+        goto done;
+
+    if (fchmod(output, mode & 0777) == -1)
+        goto done;
+    if (close(output) == -1)
+    {
+        output = -1;
+        goto done;
+    }
+    output = -1;
+
+    if (rename(temporary, destination) == -1)
+        goto done;
+
+    result = 0;
+
+done:
+    if (output != -1)
+        close(output);
+    if (input != -1)
+        close(input);
+    if (result)
+        unlink(temporary);
+    return result;
+}
+
 CEOF
   insert_before_literal "${LOADER}" \
     'static void replace_wineloader_path_with_link(char **wineloader_path, const char *image_path)' \
     "${WORK}/gm-dock-link.c"
-  perl -0777 -i -pe 's/\Qchar *app_name = extract_exe_name(image_path);\E/char *app_name = gamemachine_dock_name(image_path);\n    if (!app_name) app_name = extract_exe_name(image_path);/' "${LOADER}"
+  python3 - "${LOADER}" <<'PYLOADER'
+from pathlib import Path
+import sys
+
+loader_path = Path(sys.argv[1])
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+loader = loader_path.read_text(encoding="utf-8")
+
+loader = replace_once(
+    loader,
+    """static char *create_preloader_link(const char *wineloader_path, const char *exe_name)
+{
+    struct stat st;
+    char *linkpath = create_tempdir(wineloader_path);
+
+    if (!linkpath)
+        return NULL;
+
+    if (strlcat(linkpath, exe_name, MAX_PATH) >= MAX_PATH)
+        goto fail;
+
+    /* If the link already exists, use it (if it's in this dir, it points to the right place). */
+    if (!stat(linkpath, &st))
+        return linkpath;
+
+    /* Try a hard link first, to avoid the little "alias" arrow that the Dock puts on the icon.
+     * But if that fails, fall back to a symlink.
+     */
+    if (!link(wineloader_path, linkpath) || !symlink(wineloader_path, linkpath))
+        return linkpath;
+
+fail:
+    free(linkpath);
+    return NULL;
+}
+""",
+    """static char *create_preloader_link(const char *wineloader_path, const char *exe_name)
+{
+    struct stat source_st, link_st;
+    char *linkpath = create_tempdir(wineloader_path);
+
+    if (!linkpath)
+        return NULL;
+
+    if (stat(wineloader_path, &source_st))
+        goto fail;
+
+    if (strlcat(linkpath, exe_name, MAX_PATH) >= MAX_PATH)
+        goto fail;
+
+    if (!lstat(linkpath, &link_st))
+    {
+        if (S_ISREG(link_st.st_mode) && link_st.st_ino != source_st.st_ino &&
+            link_st.st_size == source_st.st_size)
+            return linkpath;
+        unlink(linkpath);
+    }
+
+    if (!gamemachine_copy_file(wineloader_path, linkpath, source_st.st_mode))
+        return linkpath;
+
+fail:
+    free(linkpath);
+    return NULL;
+}
+""",
+    "Dock executable copy",
+)
+
+loader = replace_once(
+    loader,
+    "    char *app_name = extract_exe_name(image_path);\n",
+    "    char *app_name = gamemachine_dock_name(image_path);\n"
+    "    if (!app_name) app_name = extract_exe_name(image_path);\n",
+    "Dock display name selection",
+)
+
+loader_path.write_text(loader, encoding="utf-8")
+PYLOADER
   grep -q "${DOCK_LINK_MARKER}" "${LOADER}" \
     || fail "Dock link name patch did not apply"
+  grep -q 'gamemachine_copy_file' "${LOADER}" \
+    || fail "Dock executable copy patch did not apply"
 fi
 
 if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then

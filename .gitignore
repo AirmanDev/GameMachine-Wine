@@ -1,3 +1,4 @@
 # Build output - published as a GitHub release asset, not committed to the repo.
 *.tar.xz
+*.tar.xz.sha256
 .DS_Store

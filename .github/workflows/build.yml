@@ -62,7 +62,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: gamemachine-wine
-          path: gamemachine-wine-*.tar.xz
+          path: |
+            gamemachine-wine-*.tar.xz
+            gamemachine-wine-*.tar.xz.sha256
           retention-days: 14
 
       - name: Publish release
@@ -72,4 +74,4 @@ jobs:
           gh release view "$BUILD_TAG" >/dev/null 2>&1 || gh release create "$BUILD_TAG" \
             --title "$BUILD_TAG" \
             --notes "Wine built from CrossOver source for GameMachine."
-          gh release upload "$BUILD_TAG" gamemachine-wine-*.tar.xz --clobber
+          gh release upload "$BUILD_TAG" gamemachine-wine-*.tar.xz gamemachine-wine-*.tar.xz.sha256 --clobber

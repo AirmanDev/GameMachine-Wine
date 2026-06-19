@@ -197,7 +197,7 @@ app = app_path.read_text(encoding="utf-8")
 main = replace_once(
     main,
     "bool enable_app_nap = false;\n",
-    "bool enable_app_nap = false;\nbool application_is_background = false;\nchar *application_display_name;\nchar *application_icon_path;\n",
+    "bool enable_app_nap = false;\nbool application_is_background = false;\nchar *application_display_name;\n",
     "macdrv globals",
 )
 main = replace_once(
@@ -209,31 +209,27 @@ main = replace_once(
     """    len = lstrlenW(appname);
 
     /* GameMachine: derive the macOS application identity from launch settings.
-       Every managed process adopts the display name and icon that match its
-       executable, otherwise the primary launch entry, so a launcher and its
-       embedded browser helpers (steamwebhelper.exe, EpicWebHelper.exe,
-       UplayWebCore.exe) all present the launcher name and icon instead of "wine".
-       An executable flagged as background (the launcher client behind the embedded
-       browser UI) activates as an accessory, so the visible helper owns the Dock. */
+       Every managed process adopts the display name that matches its executable,
+       otherwise the primary launch entry, so a launcher and its embedded browser
+       helpers (steamwebhelper.exe, EpicWebHelper.exe, UplayWebCore.exe) all present
+       the launcher name instead of "wine". An executable flagged as background (the
+       launcher client behind the embedded browser UI) activates as an accessory, so
+       the visible helper owns the Dock. */
     for (unsigned int i = 0;; i++)
     {
-        char executable_key[64], name_key[64], icon_key[64], background_key[64];
-        const char *configured_executable, *configured_name, *configured_icon, *configured_background;
+        char executable_key[64], name_key[64], background_key[64];
+        const char *configured_executable, *configured_name, *configured_background;
         WCHAR configured_executableW[MAX_PATH];
 
         snprintf(executable_key, sizeof(executable_key), "GAMEMACHINE_DOCK_EXECUTABLE_%u", i);
         snprintf(name_key, sizeof(name_key), "GAMEMACHINE_DOCK_NAME_%u", i);
-        snprintf(icon_key, sizeof(icon_key), "GAMEMACHINE_DOCK_ICON_%u", i);
         snprintf(background_key, sizeof(background_key), "GAMEMACHINE_DOCK_BACKGROUND_%u", i);
         configured_executable = getenv(executable_key);
         configured_name = getenv(name_key);
-        configured_icon = getenv(icon_key);
         if (!configured_executable && !configured_name) break;
         if (!configured_executable || !*configured_executable || !configured_name || !*configured_name) continue;
 
         if (!application_display_name) application_display_name = strdup(configured_name);
-        if (!application_icon_path && configured_icon && *configured_icon)
-            application_icon_path = strdup(configured_icon);
 
         if (strlen(configured_executable) >= ARRAY_SIZE(configured_executableW)) continue;
         asciiz_to_unicode(configured_executableW, configured_executable);
@@ -242,11 +238,6 @@ main = replace_once(
         {
             free(application_display_name);
             application_display_name = strdup(configured_name);
-            if (configured_icon && *configured_icon)
-            {
-                free(application_icon_path);
-                application_icon_path = strdup(configured_icon);
-            }
             configured_background = getenv(background_key);
             application_is_background = configured_background && *configured_background == '1';
             break;
@@ -261,7 +252,7 @@ main = replace_once(
 cocoa = replace_once(
     cocoa,
     "extern bool enable_app_nap;\n",
-    "extern bool enable_app_nap;\nextern bool application_is_background;\nextern char *application_display_name;\nextern char *application_icon_path;\n",
+    "extern bool enable_app_nap;\nextern bool application_is_background;\nextern char *application_display_name;\n",
     "macdrv declarations",
 )
 
@@ -366,18 +357,6 @@ app = replace_once(
 """,
     "application menu name",
 )
-app = replace_once(
-    app,
-    "            [NSApp setApplicationIconImage:self.applicationIcon];\n",
-    "            {\n"
-    "                NSImage *dockIcon = nil;\n"
-    "                if (application_icon_path)\n"
-    "                    dockIcon = [[[NSImage alloc] initWithContentsOfFile:\n"
-    "                                 [NSString stringWithUTF8String:application_icon_path]] autorelease];\n"
-    "                [NSApp setApplicationIconImage:dockIcon ? dockIcon : self.applicationIcon];\n"
-    "            }\n",
-    "Dock icon from launch settings",
-)
 
 main_path.write_text(main, encoding="utf-8")
 cocoa_path.write_text(cocoa, encoding="utf-8")
@@ -385,10 +364,188 @@ app_path.write_text(app, encoding="utf-8")
 PYDOCK
 fi
 
+# macOS bundle identity of the Wine loader: strip the CrossOver branding baked into the loader's
+# embedded Info.plist. The menu-bar bold title is resolved from CFBundleName, then CFBundleExecutable,
+# then the running executable name, so a static value in either key would pin the menu bar to that
+# name for every Wine process and override the per-process identity. Drop both keys: with them absent
+# the menu bar falls back to the hard-linked process name (the same launcher/game name the Dock shows),
+# keeping the two consistent. The bundle identifier must not collide with an installed CrossOver, or
+# LaunchServices maps our processes onto its registered identity.
+WINE_INFO_PLIST="${SRC}/loader/wine_info.plist.in"
+if ! grep -q 'BugyaBT.GameMachine.wineloader' "${WINE_INFO_PLIST}"; then
+  echo "==> Rebranding the Wine loader Info.plist"
+  python3 - "${WINE_INFO_PLIST}" <<'PYPLIST'
+from pathlib import Path
+import sys
+
+plist_path = Path(sys.argv[1])
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+plist = plist_path.read_text(encoding="utf-8")
+plist = replace_once(
+    plist,
+    "    <key>CFBundleExecutable</key>\n"
+    "    <string>wineloader</string><!-- CrossOver Hack 10913 -->\n",
+    "",
+    "loader bundle executable removal",
+)
+plist = replace_once(
+    plist,
+    "    <string>com.codeweavers.CrossOver.wineloader</string><!-- CrossOver Hack 10913 -->\n",
+    "    <string>BugyaBT.GameMachine.wineloader</string>\n",
+    "loader bundle identifier",
+)
+plist = replace_once(
+    plist,
+    "    <key>CFBundleName</key>\n"
+    "    <string>CrossOver-Hosted Application</string><!-- CrossOver Hack 10913 -->\n",
+    "",
+    "loader bundle name removal",
+)
+plist_path.write_text(plist, encoding="utf-8")
+PYPLIST
+  grep -q 'BugyaBT.GameMachine.wineloader' "${WINE_INFO_PLIST}" \
+    || fail "Wine loader Info.plist rebranding did not apply"
+  grep -Eq 'CFBundleName|CFBundleExecutable' "${WINE_INFO_PLIST}" \
+    && fail "Wine loader Info.plist still names the app for the menu bar"
+fi
+
+# macOS fullscreen/multi-monitor handling: Wine must not exclusively capture
+# every attached display. If a game really requests a physical mode change,
+# only that target display is captured and restored.
+FULLSCREEN_DISPLAY_MARKER='GameMachine: keep non-game macOS displays available during fullscreen'
+if ! grep -q "${FULLSCREEN_DISPLAY_MARKER}" "${MACDRV_MAIN}" || \
+   ! grep -q "${FULLSCREEN_DISPLAY_MARKER}" "${COCOA_APP}"; then
+  echo "==> Patching winemac.drv: fullscreen multi-monitor isolation"
+  python3 - "${MACDRV_MAIN}" "${COCOA_APP}" <<'PYFULLSCREEN'
+from pathlib import Path
+import sys
+
+main_path, app_path = map(Path, sys.argv[1:])
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+main = main_path.read_text(encoding="utf-8")
+app = app_path.read_text(encoding="utf-8")
+
+main = replace_once(
+    main,
+    '''    if (!get_config_key(hkey, appkey, "CaptureDisplaysForFullscreen", buffer, sizeof(buffer)))
+        capture_displays_for_fullscreen = IS_OPTION_TRUE(buffer[0]);
+''',
+    '''    /* GameMachine: keep non-game macOS displays available during fullscreen.
+       Never let a fullscreen Wine window capture every attached display.
+       A real mode change, when unavoidable, captures only its target display. */
+    capture_displays_for_fullscreen = false;
+''',
+    "disable all-display fullscreen capture",
+)
+
+app = replace_once(
+    app,
+    '''            if ([originalDisplayModes count] || displaysCapturedForFullscreen ||
+                !active || CGCaptureAllDisplays() == CGDisplayNoErr)
+''',
+    '''            /* GameMachine: keep non-game macOS displays available during fullscreen.
+               Capture only the display whose physical mode is being changed. */
+            if ([originalDisplayModes count] || displaysCapturedForFullscreen ||
+                !active || CGDisplayCapture(displayID) == CGDisplayNoErr)
+''',
+    "capture only target display for mode changes",
+)
+
+app = replace_once(
+    app,
+    '''            if ([originalDisplayModes count] == 1) // If this is the last changed display, do a blanket reset
+            {
+                CGRestorePermanentDisplayConfiguration();
+                if (!displaysCapturedForFullscreen)
+                    CGReleaseAllDisplays();
+                [originalDisplayModes removeAllObjects];
+                ret = TRUE;
+            }
+            else // ... otherwise, try to restore just the one display
+            {
+                for (id modeObject in [self modesMatchingMode:mode forDisplay:displayID])
+                {
+                    mode = (CGDisplayModeRef)modeObject;
+                    if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
+                    {
+                        [originalDisplayModes removeObjectForKey:displayIDKey];
+                        ret = TRUE;
+                        break;
+                    }
+                }
+            }
+''',
+    '''            /* GameMachine: restore only the display changed by this Wine process, and
+               always release that one display. A global reset would disturb other monitors;
+               leaving the display captured after a failed mode restore would keep it black, so
+               release it unconditionally - releasing reverts it to its permanent configuration. */
+            for (id modeObject in [self modesMatchingMode:mode forDisplay:displayID])
+            {
+                mode = (CGDisplayModeRef)modeObject;
+                if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
+                    break;
+            }
+            [originalDisplayModes removeObjectForKey:displayIDKey];
+            if (!displaysCapturedForFullscreen)
+                CGDisplayRelease(displayID);
+            ret = TRUE;
+''',
+    "restore only target display",
+)
+
+app = replace_once(
+    app,
+    '''                    else if (![originalDisplayModes count])
+                    {
+                        CGRestorePermanentDisplayConfiguration();
+                        if (!displaysCapturedForFullscreen)
+                            CGReleaseAllDisplays();
+                    }
+''',
+    '''                    else if (![originalDisplayModes count] && !displaysCapturedForFullscreen)
+                    {
+                        /* GameMachine: release only the target display after a failed/no-op mode change. */
+                        CGDisplayRelease(displayID);
+                    }
+''',
+    "release only target display after mode change failure",
+)
+
+main_path.write_text(main, encoding="utf-8")
+app_path.write_text(app, encoding="utf-8")
+PYFULLSCREEN
+
+  grep -q "${FULLSCREEN_DISPLAY_MARKER}" "${MACDRV_MAIN}" \
+    || fail "fullscreen multi-monitor main patch did not apply"
+  grep -q "${FULLSCREEN_DISPLAY_MARKER}" "${COCOA_APP}" \
+    || fail "fullscreen multi-monitor Cocoa patch did not apply"
+  grep -q 'CGDisplayCapture(displayID)' "${COCOA_APP}" \
+    || fail "target-display capture patch did not apply"
+fi
+
 LOADER="${SRC}/dlls/ntdll/unix/loader.c"
 
-# The Dock process name comes from the executable identity, so each managed
-# Wine process runs through a display-name-specific copy of the loader.
+# The Dock process name comes from the executable identity. Each managed Wine
+# process runs through a display-name-specific hard link to the loader (CW HACK
+# 22144, with a symlink fallback), so the Dock shows the launcher/game name
+# instead of "wine". Only the name is substituted; the link mechanism stays the
+# upstream CrossOver one.
 DOCK_PROCESS_MARKER='GameMachine: name the Dock process from launch settings'
 if ! grep -q "${DOCK_PROCESS_MARKER}" "${LOADER}"; then
   echo "==> Patching ntdll loader: Dock process name from launch settings"
@@ -433,63 +590,9 @@ static char *gamemachine_dock_name(const char *image_path)
     return primary;
 }
 
-static int gamemachine_copy_file(const char *source, const char *destination, mode_t mode)
-{
-    char temporary[MAX_PATH], buffer[65536];
-    int input = -1, output = -1, result = -1;
-    ssize_t bytes;
-
-    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", destination, (long)getpid())
-        >= sizeof(temporary))
-        return -1;
-
-    if ((input = open(source, O_RDONLY)) == -1)
-        goto done;
-    if ((output = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777)) == -1)
-        goto done;
-
-    while ((bytes = read(input, buffer, sizeof(buffer))) > 0)
-    {
-        char *cursor = buffer;
-        while (bytes > 0)
-        {
-            ssize_t written = write(output, cursor, bytes);
-            if (written <= 0)
-                goto done;
-            cursor += written;
-            bytes -= written;
-        }
-    }
-    if (bytes < 0)
-        goto done;
-
-    if (fchmod(output, mode & 0777) == -1)
-        goto done;
-    if (close(output) == -1)
-    {
-        output = -1;
-        goto done;
-    }
-    output = -1;
-
-    if (rename(temporary, destination) == -1)
-        goto done;
-
-    result = 0;
-
-done:
-    if (output != -1)
-        close(output);
-    if (input != -1)
-        close(input);
-    if (result)
-        unlink(temporary);
-    return result;
-}
-
 CEOF
   insert_before_literal "${LOADER}" \
-    'static void replace_wineloader_path_with_link(char **wineloader_path, const char *image_path)' \
+    'static char *create_preloader_link(const char *wineloader_path, const char *exe_name)' \
     "${WORK}/gm-dock-process.c"
   python3 - "${LOADER}" <<'PYLOADER'
 from pathlib import Path
@@ -505,59 +608,12 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1)
 
 
-def replace_c_function(text, signature, replacement, label):
-    count = text.count(signature)
-    if count != 1:
-        raise SystemExit(f"ERROR: {label} patch expected one match, found {count}")
-
-    start = text.index(signature)
-    body_start = text.index("{", start)
-    depth = 0
-    for index in range(body_start, len(text)):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                end = index + 1
-                while end < len(text) and text[end] in "\r\n":
-                    end += 1
-                return text[:start] + replacement + text[end:]
-
-    raise SystemExit(f"ERROR: {label} function end not found")
-
-
 loader = loader_path.read_text(encoding="utf-8")
 
-loader = replace_c_function(
-    loader,
-    "static char *create_preloader_link(const char *wineloader_path, const char *exe_name)",
-    """static char *create_preloader_link(const char *wineloader_path, const char *exe_name)
-{
-    struct stat source_st;
-    char *copy_path = create_tempdir(wineloader_path);
-
-    if (!copy_path)
-        return NULL;
-
-    if (stat(wineloader_path, &source_st))
-        goto fail;
-
-    if (strlcat(copy_path, exe_name, MAX_PATH) >= MAX_PATH)
-        goto fail;
-
-    if (!gamemachine_copy_file(wineloader_path, copy_path, source_st.st_mode))
-        return copy_path;
-
-fail:
-    free(copy_path);
-    return NULL;
-}
-""",
-    "Dock executable copy",
-)
-
+# Keep CrossOver's native create_preloader_link (CW HACK 22144: a hard link to the
+# loader, with a symlink fallback) and only change the name it is built from, so the
+# Dock shows the launcher/game name. The link resolves to the real loader, which keeps
+# library discovery intact - a detached byte copy in $TMPDIR would not.
 loader = replace_once(
     loader,
     "    char *app_name = extract_exe_name(image_path);\n",
@@ -566,12 +622,38 @@ loader = replace_once(
     "Dock display name selection",
 )
 
+# In the no-preloader build the Dock-name link is only created when WINEDLLPATH is set
+# (the renamed loader runs from $TMPDIR and needs it to find its builtin dlls). Default
+# WINEDLLPATH to this build's own unix dll directory so the Dock shows the launch name
+# on its own, without the host app having to export WINEDLLPATH.
+loader = replace_once(
+    loader,
+    '''    if (getenv("WINEDLLPATH"))
+        replace_wineloader_path_with_link( &(argv[1]), image_path );
+''',
+    '''    if (dll_dir && !getenv("WINEDLLPATH"))
+    {
+        char *gm_dll_path;
+        if (asprintf( &gm_dll_path, "%s%s", dll_dir, get_so_dir( current_machine ) ) != -1)
+        {
+            setenv( "WINEDLLPATH", gm_dll_path, 1 );
+            free( gm_dll_path );
+        }
+    }
+    if (getenv("WINEDLLPATH"))
+        replace_wineloader_path_with_link( &(argv[1]), image_path );
+''',
+    "default WINEDLLPATH for the Dock-name link",
+)
+
 loader_path.write_text(loader, encoding="utf-8")
 PYLOADER
   grep -q "${DOCK_PROCESS_MARKER}" "${LOADER}" \
     || fail "Dock process name patch did not apply"
-  grep -q 'gamemachine_copy_file' "${LOADER}" \
-    || fail "Dock executable copy patch did not apply"
+  grep -q 'gamemachine_dock_name(image_path)' "${LOADER}" \
+    || fail "Dock display name selection patch did not apply"
+  grep -q 'gm_dll_path' "${LOADER}" \
+    || fail "default WINEDLLPATH patch did not apply"
 fi
 
 if ! grep -q 'WINEDLLPATH_PREPEND' "${LOADER}"; then
@@ -1032,5 +1114,7 @@ echo "==> Packing ${OUTPUT_NAME}"
 cd "${WORK}/stage"
 COPYFILE_DISABLE=1 XZ_OPT=-6 tar -cJf "${OUT_DIR}/${OUTPUT_NAME}" wswine.bundle
 [ -s "${OUT_DIR}/${OUTPUT_NAME}" ] || fail "output archive was not created"
+(cd "${OUT_DIR}" && shasum -a 256 "${OUTPUT_NAME}" > "${OUTPUT_NAME}.sha256")
+[ -s "${OUT_DIR}/${OUTPUT_NAME}.sha256" ] || fail "output checksum was not created"
 
 echo "==> Done: ${OUT_DIR}/${OUTPUT_NAME}"
